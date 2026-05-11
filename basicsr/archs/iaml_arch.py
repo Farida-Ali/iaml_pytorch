@@ -72,11 +72,16 @@ class StudentDecoder(nn.Module):
     """4-level U-Net decoder with CBAM, 1×1 projection convs, and residual output head.
 
     Channel trace for 256×256 input:
-      d1: ConvTranspose(512→512) + cat(e4:512) = 1024ch @ H/16  →  u1: 256ch
-      d2: ConvTranspose(1024→256) + cat(e3:256) = 512ch @ H/8   →  u2: 128ch
-      d3: ConvTranspose(512→128) + cat(e2:128) = 256ch @ H/4    →  u3: 64ch
-      d4: ConvTranspose(256→64) + cat(e1:64) = 128ch @ H/2      →  u4: 32ch
-      d5: ConvTranspose(128→32) + cat(img:3) = 35ch @ H         →  out: 3ch
+      d1: ConvTranspose(512→512) + cat(e4:512) = 1024ch @ H/16
+      d2: ConvTranspose(1024→256) + cat(e3:256) = 512ch @ H/8
+      d3: ConvTranspose(512→128) + cat(e2:128) = 256ch @ H/4
+      d4: ConvTranspose(256→64) + cat(e1:64) = 128ch @ H/2   (used by output head only)
+
+    Projections collected shallow→deep (matching published IAML ordering):
+      u1 = proj1(d3): 256ch @ H/4    pairs[0]
+      u2 = proj2(d2): 128ch @ H/8    pairs[1]
+      u3 = proj3(d1):  64ch @ H/16   pairs[2]
+      u4 = proj4(e5):  32ch @ H/32   pairs[3]
 
     Returns: (output_image, [u1, u2, u3, u4])
     """
@@ -84,16 +89,16 @@ class StudentDecoder(nn.Module):
     def __init__(self):
         super().__init__()
         # Decoder blocks
-        self.dec1 = DecoderBlock(512,  512, skip_ch=512)   # d1: 1024ch
-        self.dec2 = DecoderBlock(1024, 256, skip_ch=256)   # d2: 512ch
-        self.dec3 = DecoderBlock(512,  128, skip_ch=128)   # d3: 256ch
-        self.dec4 = DecoderBlock(256,  64,  skip_ch=64)    # d4: 128ch
+        self.dec1 = DecoderBlock(512,  512, skip_ch=512)   # d1: 1024ch @ H/16
+        self.dec2 = DecoderBlock(1024, 256, skip_ch=256)   # d2: 512ch  @ H/8
+        self.dec3 = DecoderBlock(512,  128, skip_ch=128)   # d3: 256ch  @ H/4
+        self.dec4 = DecoderBlock(256,  64,  skip_ch=64)    # d4: 128ch  @ H/2
 
-        # 1×1 projection convs — outputs used by IAML loss
-        self.proj1 = nn.Conv2d(1024, 256, kernel_size=1)   # u1
-        self.proj2 = nn.Conv2d(512,  128, kernel_size=1)   # u2
-        self.proj3 = nn.Conv2d(256,  64,  kernel_size=1)   # u3
-        self.proj4 = nn.Conv2d(128,  32,  kernel_size=1)   # u4
+        # 1×1 projection convs — shallow→deep, outputs used by IAML loss
+        self.proj1 = nn.Conv2d(256,  256, kernel_size=1)   # u1: d3 → 256ch @ H/4
+        self.proj2 = nn.Conv2d(512,  128, kernel_size=1)   # u2: d2 → 128ch @ H/8
+        self.proj3 = nn.Conv2d(1024,  64, kernel_size=1)   # u3: d1 →  64ch @ H/16
+        self.proj4 = nn.Conv2d(512,   32, kernel_size=1)   # u4: e5 →  32ch @ H/32
 
         # Output head: upsample to full res, concat input image, residual prediction
         self.up5   = nn.ConvTranspose2d(128, 32, kernel_size=3, stride=2, padding=1, output_padding=1)
@@ -103,18 +108,17 @@ class StudentDecoder(nn.Module):
         self.conv_out2 = nn.Conv2d(32, 3, kernel_size=3, padding=1)
 
     def forward(self, e1, e2, e3, e4, e5, img):
-        # (B, C, H, W) shapes for 256×256 input shown in comments
+        # Decoder blocks (B, C, H, W) for 256×256 input shown in comments
         d1 = self.dec1(e5, e4)          # (B, 1024, H/16, W/16)
-        u1 = self.proj1(d1)             # (B, 256,  H/16, W/16)
-
         d2 = self.dec2(d1, e3)          # (B, 512,  H/8,  W/8)
-        u2 = self.proj2(d2)             # (B, 128,  H/8,  W/8)
-
         d3 = self.dec3(d2, e2)          # (B, 256,  H/4,  W/4)
-        u3 = self.proj3(d3)             # (B, 64,   H/4,  W/4)
-
         d4 = self.dec4(d3, e1)          # (B, 128,  H/2,  W/2)
-        u4 = self.proj4(d4)             # (B, 32,   H/2,  W/2)
+
+        # Projections: shallow→deep ordering
+        u1 = self.proj1(d3)             # (B, 256,  H/4,  W/4)
+        u2 = self.proj2(d2)             # (B, 128,  H/8,  W/8)
+        u3 = self.proj3(d1)             # (B,  64,  H/16, W/16)
+        u4 = self.proj4(e5)             # (B,  32,  H/32, W/32)
 
         # Output head
         d5 = self.act5(self.up5(d4))    # (B, 32,   H,    W)
