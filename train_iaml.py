@@ -9,83 +9,18 @@ Usage:
 
 import argparse
 import os
-import random
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 
 from basicsr.archs.iaml_arch import IAMLNet
+from basicsr.data import create_dataset, create_dataloader
 from basicsr.losses.iaml_loss import TotalLoss
-
-
-# ── Dataset ───────────────────────────────────────────────────────────────────
-
-class LOLDataset(Dataset):
-    """Paired low-light / clean image dataset for LOL-style directory layout.
-
-    Training:   random 256×256 crop + random H/V flip + normalize to [0,1]
-    Validation: full native resolution, no crop, no flip, normalize to [0,1]
-    """
-
-    EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
-
-    def __init__(self, input_dir: str, target_dir: str,
-                 patch_size: int = 256, is_train: bool = True):
-        self.patch_size = patch_size
-        self.is_train   = is_train
-
-        self.input_paths  = sorted(
-            p for p in (os.path.join(input_dir, f)
-                        for f in os.listdir(input_dir))
-            if p.lower().endswith(self.EXTENSIONS)
-        )
-        self.target_paths = sorted(
-            p for p in (os.path.join(target_dir, f)
-                        for f in os.listdir(target_dir))
-            if p.lower().endswith(self.EXTENSIONS)
-        )
-        assert len(self.input_paths) == len(self.target_paths), (
-            f"Input/target count mismatch: {len(self.input_paths)} vs "
-            f"{len(self.target_paths)}"
-        )
-
-    def __len__(self) -> int:
-        return len(self.input_paths)
-
-    def __getitem__(self, idx: int):
-        inp = np.array(Image.open(self.input_paths[idx]).convert('RGB'),
-                       dtype=np.float32) / 255.0
-        tgt = np.array(Image.open(self.target_paths[idx]).convert('RGB'),
-                       dtype=np.float32) / 255.0
-
-        if self.is_train:
-            H, W = inp.shape[:2]
-            ps   = self.patch_size
-            # Random crop — images smaller than patch_size are used as-is
-            if H > ps and W > ps:
-                top  = random.randint(0, H - ps)
-                left = random.randint(0, W - ps)
-                inp = inp[top:top+ps, left:left+ps]
-                tgt = tgt[top:top+ps, left:left+ps]
-            # Random horizontal flip
-            if random.random() < 0.5:
-                inp = np.fliplr(inp).copy()
-                tgt = np.fliplr(tgt).copy()
-            # Random vertical flip
-            if random.random() < 0.5:
-                inp = np.flipud(inp).copy()
-                tgt = np.flipud(tgt).copy()
-
-        # HWC → CHW, contiguous float32 tensor
-        inp_t = torch.from_numpy(inp.transpose(2, 0, 1))
-        tgt_t = torch.from_numpy(tgt.transpose(2, 0, 1))
-        return inp_t, tgt_t
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -108,24 +43,24 @@ def pad_to_multiple(x: torch.Tensor, multiple: int = 32) -> tuple:
 
 # ── Validation ────────────────────────────────────────────────────────────────
 
-def validate(model: IAMLNet, val_loader: DataLoader,
+def validate(model: IAMLNet, val_loader,
              device: torch.device) -> tuple:
     """Compute mean PSNR and SSIM on Y channel at full native resolution."""
     psnr_list, ssim_list = [], []
 
     with torch.no_grad():
-        for x_low, x_clean in val_loader:
-            x_low   = x_low.to(device)
-            x_clean = x_clean.to(device)
+        for batch in val_loader:
+            lq = batch['lq'].to(device)
+            gt = batch['gt'].to(device)
 
-            _, _, H, W = x_low.shape
-            x_padded, pad_h, pad_w = pad_to_multiple(x_low)
+            _, _, H, W = lq.shape
+            lq_padded, pad_h, pad_w = pad_to_multiple(lq)
 
-            enhanced = model.inference(x_padded)
+            enhanced = model.inference(lq_padded)
             enhanced = enhanced[:, :, :H, :W].clamp(0.0, 1.0)
 
             enhanced_np = enhanced.squeeze(0).permute(1, 2, 0).cpu().numpy()
-            clean_np    = x_clean.squeeze(0).permute(1, 2, 0).cpu().numpy()
+            clean_np    = gt.squeeze(0).permute(1, 2, 0).cpu().numpy()
 
             enh_y   = rgb_to_y(enhanced_np)
             clean_y = rgb_to_y(clean_np)
@@ -146,23 +81,40 @@ def train(args):
 
     os.makedirs('checkpoints', exist_ok=True)
 
-    # Datasets and loaders
-    train_ds = LOLDataset(
-        input_dir  = os.path.join(args.data_root, 'Train', 'input'),
-        target_dir = os.path.join(args.data_root, 'Train', 'target'),
-        patch_size = 256,
-        is_train   = True,
-    )
-    val_ds = LOLDataset(
-        input_dir  = os.path.join(args.data_root, 'Test', 'input'),
-        target_dir = os.path.join(args.data_root, 'Test', 'target'),
-        is_train   = False,
-    )
+    # Datasets and loaders via BasicSR pipeline
+    train_dataset_opt = {
+        'name': 'LOLv1_train',
+        'type': 'Dataset_PairedImage',
+        'dataroot_gt': os.path.join(args.data_root, 'Train', 'target'),
+        'dataroot_lq': os.path.join(args.data_root, 'Train', 'input'),
+        'geometric_augs': True,
+        'filename_tmpl': '{}',
+        'io_backend': {'type': 'disk'},
+        'gt_size': 256,
+        'batch_size_per_gpu': 8,
+        'num_worker_per_gpu': 4,
+        'dataset_enlarge_ratio': 1,
+        'prefetch_mode': None,
+        'phase': 'train',
+        'scale': 1,
+    }
+    val_dataset_opt = {
+        'name': 'LOLv1_val',
+        'type': 'Dataset_PairedImage',
+        'dataroot_gt': os.path.join(args.data_root, 'Test', 'target'),
+        'dataroot_lq': os.path.join(args.data_root, 'Test', 'input'),
+        'io_backend': {'type': 'disk'},
+        'phase': 'val',
+        'scale': 1,
+    }
 
-    train_loader = DataLoader(train_ds, batch_size=8, shuffle=True,
-                              num_workers=4, pin_memory=True)
-    val_loader   = DataLoader(val_ds,   batch_size=1, shuffle=False,
-                              num_workers=4, pin_memory=True)
+    train_ds = create_dataset(train_dataset_opt)
+    val_ds   = create_dataset(val_dataset_opt)
+
+    train_loader = create_dataloader(
+        train_ds, train_dataset_opt, num_gpu=1, dist=False, sampler=None, seed=100)
+    val_loader   = create_dataloader(
+        val_ds, val_dataset_opt, num_gpu=1, dist=False, sampler=None, seed=100)
 
     # Model, loss, optimiser, scheduler
     model     = IAMLNet().to(device)
@@ -194,13 +146,13 @@ def train(args):
     for epoch in range(start_epoch, 501):
         model.train()
 
-        for x_low, x_clean in train_loader:
-            x_low   = x_low.to(device)
-            x_clean = x_clean.to(device)
+        for batch in train_loader:
+            lq = batch['lq'].to(device)
+            gt = batch['gt'].to(device)
 
             optimizer.zero_grad()
-            enhanced, pairs = model(x_low, x_clean)
-            loss_dict = criterion(enhanced, x_clean, pairs, x_low)
+            enhanced, pairs = model(lq, gt)
+            loss_dict = criterion(enhanced, gt, pairs, lq)
             loss_dict['total'].backward()
             optimizer.step()
             model.ema_update()   # EMA after every optimizer.step()
@@ -359,8 +311,8 @@ def smoke_test():
 
         class FakeValLoader:
             def __iter__(self):
-                yield (torch.rand(1, 3, 400, 600, device=device),
-                       torch.rand(1, 3, 400, 600, device=device))
+                yield {'lq': torch.rand(1, 3, 400, 600, device=device),
+                       'gt': torch.rand(1, 3, 400, 600, device=device)}
 
         val_psnr, val_ssim = validate(model, FakeValLoader(), device)
         assert isinstance(val_psnr, float) and isinstance(val_ssim, float)

@@ -1,0 +1,91 @@
+# general settings
+name: IAML_LOLv2_synthetic
+model_type: ImageCleanModel
+scale: 1
+num_gpu: 1
+manual_seed: 100
+
+datasets:
+  train:
+    name: LOLv2_synthetic_train
+    type: Dataset_PairedImage
+    dataroot_gt: data/LOLv2/Synthetic/Train/Normal
+    dataroot_lq: data/LOLv2/Synthetic/Train/Low
+    geometric_augs: true
+
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+    gt_size: 256
+    batch_size_per_gpu: 8
+    num_worker_per_gpu: 4
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    name: LOLv2_synthetic_val
+    type: Dataset_PairedImage
+    dataroot_gt: data/LOLv2/Synthetic/Test/Normal
+    dataroot_lq: data/LOLv2/Synthetic/Test/Low
+    io_backend:
+      type: disk
+
+network_g:
+  type: IAMLNet
+
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  total_iter: 56250
+  # 500 epochs × ceil(900 images / 8 batch) = 500 × 113 = 56,500 → 56,250 exact
+  warmup_iter: -1
+
+  optim_g:
+    type: Adam
+    lr: !!float 2e-4
+    betas: [0.9, 0.999]
+    weight_decay: 0
+
+  scheduler:
+    type: CosineAnnealingLR
+    T_max: 500
+    eta_min: !!float 1e-7
+
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1
+    reduction: mean
+
+val:
+  window_size: 32
+  val_freq: !!float 5650          # every 5 epochs (5 × 113 iters/epoch)
+  save_img: true
+  rgb2bgr: true
+  use_image: false
+  max_minibatch: 1
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: true
+    ssim:
+      type: calculate_ssim
+      crop_border: 0
+      test_y_channel: true
+
+logger:
+  print_freq: 500
+  save_checkpoint_freq: !!float 5650
+  use_tb_logger: false
+  wandb:
+    project: ~
+    resume_id: ~
+
+dist_params:
+  backend: nccl
+  port: 29500

@@ -1,0 +1,99 @@
+# general settings
+name: IAML_LOLv1
+model_type: ImageCleanModel
+scale: 1
+num_gpu: 1
+manual_seed: 100
+
+# dataset and data loader settings
+datasets:
+  train:
+    name: LOLv1_train
+    type: Dataset_PairedImage       # BasicSR class name in this repo
+    dataroot_gt: data/LOLv1/Train/target
+    dataroot_lq: data/LOLv1/Train/input
+    geometric_augs: true            # required field for Dataset_PairedImage
+
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+    gt_size: 256                    # random crop size
+    batch_size_per_gpu: 8
+    num_worker_per_gpu: 4
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    name: LOLv1_val
+    type: Dataset_PairedImage
+    dataroot_gt: data/LOLv1/Test/target
+    dataroot_lq: data/LOLv1/Test/input
+    io_backend:
+      type: disk
+
+# network architecture
+network_g:
+  type: IAMLNet
+
+# path
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+# training settings
+train:
+  total_iter: 30313
+  # 500 epochs × ceil(485 images / 8 batch) = 500 × 61 = 30,500 → 30,313 exact
+  warmup_iter: -1
+
+  optim_g:
+    type: Adam
+    lr: !!float 2e-4
+    betas: [0.9, 0.999]
+    weight_decay: 0
+
+  scheduler:
+    type: CosineAnnealingLR
+    T_max: 500
+    eta_min: !!float 1e-7
+
+  # losses — placeholder; IAML uses its own TotalLoss, not BasicSR's loss registry
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1
+    reduction: mean
+
+# validation settings
+val:
+  window_size: 32
+  val_freq: !!float 3050          # every 5 epochs (5 × 61 iters/epoch)
+  save_img: true
+  rgb2bgr: true
+  use_image: false
+  max_minibatch: 1
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: true
+    ssim:
+      type: calculate_ssim
+      crop_border: 0
+      test_y_channel: true
+
+# logging settings
+logger:
+  print_freq: 500
+  save_checkpoint_freq: !!float 3050
+  use_tb_logger: false
+  wandb:
+    project: ~
+    resume_id: ~
+
+# dist training settings
+dist_params:
+  backend: nccl
+  port: 29500
