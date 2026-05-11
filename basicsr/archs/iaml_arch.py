@@ -164,16 +164,26 @@ class IAMLNet(nn.Module):
             enhanced:  (B, 3, H, W) enhanced image
             pairs:     [(u1,t1), (u2,t2), (u3,t3), (u4,t4)]
         """
-        # ── Student path (gradients flow) ────────────────────────────────────
+        # ── Student path: encoder in train mode ──────────────────────────────
+        self.encoder.train()
         e1_s, e2_s, e3_s, e4_s, e5_s = self.encoder(x_low)
-        enhanced, student_feats = self.student_decoder(e1_s, e2_s, e3_s, e4_s, e5_s, x_low)
+        enhanced, student_feats = self.student_decoder(
+            e1_s, e2_s, e3_s, e4_s, e5_s, x_low
+        )
 
-        # ── Teacher path (no gradients; encoder runs in eval/running-stats mode) ──
+        # ── Teacher path: eval mode + no gradient ────────────────────────────
+        # .eval() makes BatchNorm use running statistics,
+        # matching TensorFlow's training=False behaviour.
+        self.encoder.eval()
+        self.teacher_decoder.eval()
         with torch.no_grad():
-            self.encoder.eval()
             e1_t, e2_t, e3_t, e4_t, e5_t = self.encoder(x_clean)
-            self.encoder.train()
-            _, teacher_feats = self.teacher_decoder(e1_t, e2_t, e3_t, e4_t, e5_t, x_clean)
+            _, teacher_feats = self.teacher_decoder(
+                e1_t, e2_t, e3_t, e4_t, e5_t, x_clean
+            )
+
+        # ── Restore encoder to train mode for next iteration ─────────────────
+        self.encoder.train()
 
         pairs = list(zip(student_feats, teacher_feats))
         return enhanced, pairs
