@@ -1,9 +1,9 @@
 """
-IAML training script.
+IAML training script — BasicSR YAML-config convention.
 
 Usage:
-    python train_iaml.py --data_root data/LOLv1
-    python train_iaml.py --data_root data/LOLv1 --resume checkpoints/best_model.pth
+    python train_iaml.py -opt options/train/train_IAML_LOLv1.yml
+    python train_iaml.py -opt options/train/train_IAML_LOLv1.yml --resume checkpoints/IAML_LOLv1/latest.pth
     python train_iaml.py --smoke_test
 """
 
@@ -13,10 +13,10 @@ import os
 import numpy as np
 import torch
 import torch.nn.functional as F
+import yaml
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader
 
 from basicsr.archs.iaml_arch import IAMLNet
 from basicsr.data import create_dataset, create_dataloader
@@ -34,17 +34,22 @@ def rgb_to_y(img_rgb: np.ndarray) -> np.ndarray:
 
 
 def pad_to_multiple(x: torch.Tensor, multiple: int = 32) -> tuple:
-    """Pad (B,C,H,W) tensor to nearest multiple with reflection, return (padded, pad_h, pad_w)."""
+    """Pad (B,C,H,W) to nearest multiple with reflection; return (padded, pad_h, pad_w)."""
     _, _, H, W = x.shape
     pad_h = (multiple - H % multiple) % multiple
     pad_w = (multiple - W % multiple) % multiple
     return F.pad(x, (0, pad_w, 0, pad_h), mode='reflect'), pad_h, pad_w
 
 
+def load_opt(opt_path: str) -> dict:
+    """Load and return the YAML config as a dict."""
+    with open(opt_path, 'r') as f:
+        return yaml.safe_load(f)
+
+
 # ── Validation ────────────────────────────────────────────────────────────────
 
-def validate(model: IAMLNet, val_loader,
-             device: torch.device) -> tuple:
+def validate(model: IAMLNet, val_loader, device: torch.device) -> tuple:
     """Compute mean PSNR and SSIM on Y channel at full native resolution."""
     psnr_list, ssim_list = [], []
 
@@ -76,77 +81,93 @@ def validate(model: IAMLNet, val_loader,
 # ── Training ──────────────────────────────────────────────────────────────────
 
 def train(args):
+    opt = load_opt(args.opt)
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
+    print(f"Config: {args.opt}  ({opt.get('name', 'unknown')})\n")
 
-    os.makedirs('checkpoints', exist_ok=True)
+    # ── Dataset opts from YAML ────────────────────────────────────────────────
+    train_opt = opt['datasets']['train']
+    val_opt   = opt['datasets']['val']
 
-    # Datasets and loaders via BasicSR pipeline
-    train_dataset_opt = {
-        'name': 'LOLv1_train',
-        'type': 'Dataset_PairedImage',
-        'dataroot_gt': os.path.join(args.data_root, 'Train', 'target'),
-        'dataroot_lq': os.path.join(args.data_root, 'Train', 'input'),
-        'geometric_augs': True,
-        'filename_tmpl': '{}',
-        'io_backend': {'type': 'disk'},
-        'gt_size': 256,
-        'batch_size_per_gpu': 8,
-        'num_worker_per_gpu': 4,
-        'dataset_enlarge_ratio': 1,
-        'prefetch_mode': None,
-        'phase': 'train',
-        'scale': 1,
-    }
-    val_dataset_opt = {
-        'name': 'LOLv1_val',
-        'type': 'Dataset_PairedImage',
-        'dataroot_gt': os.path.join(args.data_root, 'Test', 'target'),
-        'dataroot_lq': os.path.join(args.data_root, 'Test', 'input'),
-        'io_backend': {'type': 'disk'},
-        'phase': 'val',
-        'scale': 1,
-    }
+    # Ensure required BasicSR fields that may be absent from the YAML section
+    global_scale = opt.get('scale', 1)
+    train_opt.setdefault('phase',      'train')
+    train_opt.setdefault('scale',      global_scale)
+    train_opt.setdefault('io_backend', {'type': 'disk'})
+    val_opt.setdefault('phase',      'val')
+    val_opt.setdefault('scale',      global_scale)
+    val_opt.setdefault('io_backend', {'type': 'disk'})
 
-    train_ds = create_dataset(train_dataset_opt)
-    val_ds   = create_dataset(val_dataset_opt)
+    train_ds = create_dataset(train_opt)
+    val_ds   = create_dataset(val_opt)
 
+    seed = opt.get('manual_seed', 100)
     train_loader = create_dataloader(
-        train_ds, train_dataset_opt, num_gpu=1, dist=False, sampler=None, seed=100)
+        train_ds, train_opt, num_gpu=1, dist=False, sampler=None, seed=seed)
     val_loader   = create_dataloader(
-        val_ds, val_dataset_opt, num_gpu=1, dist=False, sampler=None, seed=100)
+        val_ds, val_opt, num_gpu=1, dist=False, sampler=None, seed=seed)
 
-    # Model, loss, optimiser, scheduler
+    # ── Training hyperparams from YAML ────────────────────────────────────────
+    train_cfg  = opt['train']
+    total_iter = int(train_cfg['total_iter'])
+
+    optim_cfg  = train_cfg['optim_g']
+    lr         = float(optim_cfg['lr'])
+    betas      = tuple(optim_cfg.get('betas', [0.9, 0.999]))
+
+    sched_cfg  = train_cfg['scheduler']
+    T_max      = int(sched_cfg['T_max'])
+    eta_min    = float(sched_cfg['eta_min'])
+
+    val_cfg    = opt.get('val', {})
+    val_freq   = int(val_cfg.get('val_freq', total_iter // 10))
+
+    log_cfg    = opt.get('logger', {})
+    print_freq = int(log_cfg.get('print_freq', 100))
+    save_freq  = int(log_cfg.get('save_checkpoint_freq', val_freq))
+
+    exp_name   = opt.get('name', 'iaml')
+    ckpt_dir   = os.path.join('checkpoints', exp_name)
+    os.makedirs(ckpt_dir, exist_ok=True)
+
+    print(f"total_iter={total_iter}  lr={lr}  val_freq={val_freq}  "
+          f"print_freq={print_freq}  ckpt_dir={ckpt_dir}\n")
+
+    # ── Model, loss, optimiser, scheduler ─────────────────────────────────────
     model     = IAMLNet().to(device)
     criterion = TotalLoss().to(device)
-    optimizer = Adam(
-        list(model.encoder.parameters()) +
-        list(model.student_decoder.parameters()),
-        lr=2e-4, betas=(0.9, 0.999),
-    )
-    scheduler = CosineAnnealingLR(optimizer, T_max=500, eta_min=1e-7)
+    optimizer = Adam(model.student_parameters(), lr=lr, betas=betas)
+    scheduler = CosineAnnealingLR(optimizer, T_max=T_max, eta_min=eta_min)
 
-    start_epoch = 1
-    best_ssim   = 0.0
-    best_psnr   = 0.0
+    start_iter = 0
+    best_ssim  = 0.0
+    best_psnr  = 0.0
 
-    if args.resume:
-        ckpt = torch.load(args.resume, map_location=device)
+    resume_path = args.resume or opt.get('path', {}).get('resume_state')
+    if resume_path:
+        ckpt = torch.load(resume_path, map_location=device)
         model.load_state_dict(ckpt['model_state_dict'])
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         scheduler.load_state_dict(ckpt['scheduler_state_dict'])
-        start_epoch = ckpt['epoch'] + 1
-        best_ssim   = ckpt['best_ssim']
-        best_psnr   = ckpt['best_psnr']
-        print(f"Resumed from epoch {ckpt['epoch']} "
-              f"(best SSIM {best_ssim:.4f})")
+        start_iter = ckpt['iteration']
+        best_ssim  = ckpt['best_ssim']
+        best_psnr  = ckpt['best_psnr']
+        print(f"Resumed from iter {start_iter} (best SSIM {best_ssim:.4f})\n")
 
-    iteration = 0
+    # ── Iteration-based training loop ─────────────────────────────────────────
+    iteration = start_iter
+    epoch     = 0
 
-    for epoch in range(start_epoch, 501):
+    while iteration < total_iter:
+        epoch += 1
         model.train()
 
         for batch in train_loader:
+            if iteration >= total_iter:
+                break
+
             lq = batch['lq'].to(device)
             gt = batch['gt'].to(device)
 
@@ -155,41 +176,53 @@ def train(args):
             loss_dict = criterion(enhanced, gt, pairs, lq)
             loss_dict['total'].backward()
             optimizer.step()
-            model.ema_update()   # EMA after every optimizer.step()
+            model.ema_update()
 
             iteration += 1
-            if iteration % 100 == 0:
-                print(f"Epoch {epoch:03d} | Iter {iteration:06d} | "
+
+            if iteration % print_freq == 0 or iteration == 1:
+                print(f"Epoch {epoch:04d} | Iter {iteration:06d}/{total_iter} | "
                       f"Total: {loss_dict['total'].item():.4f} | "
                       f"MSE: {loss_dict['mse'].item():.4f} | "
                       f"SSIM: {loss_dict['ssim'].item():.4f} | "
                       f"IAML: {loss_dict['iaml'].item():.4f}")
 
-        scheduler.step()   # once per epoch, after all batches
+            if iteration % val_freq == 0 or iteration == total_iter:
+                model.eval()
+                val_psnr, val_ssim = validate(model, val_loader, device)
+                print(f"\n[Val] Iter {iteration:06d} | "
+                      f"PSNR: {val_psnr:.2f} dB | SSIM: {val_ssim:.4f}")
 
-        if epoch % 5 == 0 or epoch == 1:
-            model.eval()
-            val_psnr, val_ssim = validate(model, val_loader, device)
+                if val_ssim > best_ssim:
+                    best_ssim = val_ssim
+                    best_psnr = val_psnr
+                    torch.save({
+                        'iteration':            iteration,
+                        'model_state_dict':     model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict(),
+                        'best_ssim':            best_ssim,
+                        'best_psnr':            best_psnr,
+                    }, os.path.join(ckpt_dir, 'best_model.pth'))
+                    print(f"  Saved best model — PSNR: {best_psnr:.2f}  SSIM: {best_ssim:.4f}")
 
-            print(f"Epoch {epoch:03d} | Val PSNR: {val_psnr:.2f} | "
-                  f"Val SSIM: {val_ssim:.4f}")
+                print()
+                model.train()
 
-            if val_ssim > best_ssim:
-                best_ssim = val_ssim
-                best_psnr = val_psnr
+            if iteration % save_freq == 0:
                 torch.save({
-                    'epoch':                epoch,
+                    'iteration':            iteration,
                     'model_state_dict':     model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'best_ssim':            best_ssim,
                     'best_psnr':            best_psnr,
-                }, 'checkpoints/best_model.pth')
-                print(f"  ✅ Saved best model — SSIM: {best_ssim:.4f}")
+                }, os.path.join(ckpt_dir, 'latest.pth'))
 
-            model.train()
+        scheduler.step()   # once per epoch
 
-    print(f"\nDone. Best PSNR: {best_psnr:.2f}  Best SSIM: {best_ssim:.4f}")
+    print(f"\nTraining complete — {total_iter} iterations over {epoch} epochs.")
+    print(f"Best PSNR: {best_psnr:.2f} dB   Best SSIM: {best_ssim:.4f}")
 
 
 # ── Smoke test ────────────────────────────────────────────────────────────────
@@ -203,11 +236,7 @@ def smoke_test():
 
     model     = IAMLNet().to(device)
     criterion = TotalLoss().to(device)
-    optimizer = Adam(
-        list(model.encoder.parameters()) +
-        list(model.student_decoder.parameters()),
-        lr=2e-4, betas=(0.9, 0.999),
-    )
+    optimizer = Adam(model.student_parameters(), lr=2e-4, betas=(0.9, 0.999))
 
     results = {}
 
@@ -276,13 +305,13 @@ def smoke_test():
     # ── Check 6: EMA changes teacher weights (after optimizer.step()) ─────────
     try:
         teacher_w_before = list(model.teacher_decoder.state_dict().values())[0].clone()
-        optimizer.step()       # student weights now differ from teacher
+        optimizer.step()
         model.ema_update()
         teacher_w_after = list(model.teacher_decoder.state_dict().values())[0]
         assert not torch.allclose(teacher_w_before, teacher_w_after), \
             "EMA did not change teacher weights"
         delta = (teacher_w_after - teacher_w_before).abs().mean().item()
-        results[6] = ('PASS', f"teacher weights changed (mean Δ={delta:.2e})")
+        results[6] = ('PASS', f"teacher weights changed (mean delta={delta:.2e})")
     except Exception as e:
         results[6] = ('FAIL', str(e))
 
@@ -318,7 +347,6 @@ def smoke_test():
         assert isinstance(val_psnr, float) and isinstance(val_ssim, float)
         assert not np.isnan(val_psnr) and not np.isnan(val_ssim)
 
-        # Verify pad/crop logic directly
         fake = torch.rand(1, 3, 400, 600, device=device)
         padded, pad_h, pad_w = pad_to_multiple(fake)
         assert padded.shape[2] % 32 == 0 and padded.shape[3] % 32 == 0
@@ -328,42 +356,43 @@ def smoke_test():
             f"Expected (1,3,400,600), got {tuple(out.shape)}"
 
         results[8] = ('PASS',
-                      f"600×400 → padded {tuple(padded.shape[2:])} → "
-                      f"cropped back (400,600) | "
+                      f"600x400 padded {tuple(padded.shape[2:])} cropped back (400,600) | "
                       f"PSNR={val_psnr:.2f} SSIM={val_ssim:.4f}")
     except Exception as e:
         results[8] = ('FAIL', str(e))
 
     # ── Summary ───────────────────────────────────────────────────────────────
-    print("═" * 65)
+    print("=" * 65)
     all_pass = True
     for i in range(1, 9):
         status, detail = results[i]
-        icon = '✅' if status == 'PASS' else '❌'
-        print(f"  {icon} Check {i}: {status}  —  {detail}")
+        icon = 'OK' if status == 'PASS' else 'FAIL'
+        print(f"  [{icon}] Check {i}: {status}  --  {detail}")
         if status != 'PASS':
             all_pass = False
-    print("═" * 65)
+    print("=" * 65)
     if all_pass:
-        print("🎉 All 8 checks passed. Pipeline is ready for training.")
+        print("All 8 checks passed. Pipeline is ready for training.")
     else:
-        print("❌ Some checks failed. See details above.")
+        print("Some checks failed. See details above.")
         sys.exit(1)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--data_root', default='data/LOLv1',
-                        help='Root of LOL dataset (contains Train/ and Test/)')
+    parser = argparse.ArgumentParser(description='IAML training script')
+    parser.add_argument('-opt', type=str, default=None,
+                        help='Path to YAML training config (e.g. options/train/train_IAML_LOLv1.yml)')
     parser.add_argument('--resume', default=None,
-                        help='Path to checkpoint to resume from')
+                        help='Path to checkpoint to resume from (overrides path.resume_state in YAML)')
     parser.add_argument('--smoke_test', action='store_true',
-                        help='Run smoke test instead of training')
+                        help='Run smoke test instead of training (no -opt needed)')
     args = parser.parse_args()
 
     if args.smoke_test:
         smoke_test()
     else:
+        if args.opt is None:
+            parser.error('-opt is required for training (e.g. -opt options/train/train_IAML_LOLv1.yml)')
         train(args)
