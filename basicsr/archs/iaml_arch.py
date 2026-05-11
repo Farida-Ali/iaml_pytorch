@@ -123,3 +123,83 @@ class StudentDecoder(nn.Module):
         out = torch.sigmoid(out + img)             # residual + sigmoid
 
         return out, [u1, u2, u3, u4]
+
+
+# TeacherDecoder is architecturally identical to StudentDecoder.
+# Using a class alias keeps the two objects independent (separate parameter sets)
+# while sharing the same architecture definition.
+TeacherDecoder = StudentDecoder
+
+
+class IAMLNet(nn.Module):
+    """Teacher-student low-light enhancement network with IAML loss support.
+
+    One shared encoder processes both paths.
+    Student decoder is trained with gradients.
+    Teacher decoder is a frozen EMA copy of the student decoder.
+
+    At inference time only encoder + student_decoder are used.
+    """
+
+    EMA_MOMENTUM = 0.999
+
+    def __init__(self):
+        super().__init__()
+        self.encoder         = Encoder()
+        self.student_decoder = StudentDecoder()
+        self.teacher_decoder = TeacherDecoder()
+
+        # Teacher starts with exact student weights; frozen from here on.
+        self.teacher_decoder.load_state_dict(self.student_decoder.state_dict())
+        for param in self.teacher_decoder.parameters():
+            param.requires_grad = False
+
+    def forward(self, x_low: torch.Tensor, x_clean: torch.Tensor):
+        """Full teacher-student forward pass used during training.
+
+        Student path: encoder(x_low, train=True) → student_decoder → enhanced, [u1..u4]
+        Teacher path: encoder(x_clean, eval/no_grad) → teacher_decoder → [t1..t4]
+
+        Returns:
+            enhanced:  (B, 3, H, W) enhanced image
+            pairs:     [(u1,t1), (u2,t2), (u3,t3), (u4,t4)]
+        """
+        # ── Student path (gradients flow) ────────────────────────────────────
+        e1_s, e2_s, e3_s, e4_s, e5_s = self.encoder(x_low)
+        enhanced, student_feats = self.student_decoder(e1_s, e2_s, e3_s, e4_s, e5_s, x_low)
+
+        # ── Teacher path (no gradients; encoder runs in eval/running-stats mode) ──
+        with torch.no_grad():
+            self.encoder.eval()
+            e1_t, e2_t, e3_t, e4_t, e5_t = self.encoder(x_clean)
+            self.encoder.train()
+            _, teacher_feats = self.teacher_decoder(e1_t, e2_t, e3_t, e4_t, e5_t, x_clean)
+
+        pairs = list(zip(student_feats, teacher_feats))
+        return enhanced, pairs
+
+    @torch.no_grad()
+    def ema_update(self):
+        """EMA update of teacher decoder weights. Call after every optimizer.step().
+
+        W_teacher = 0.999 * W_teacher + 0.001 * W_student
+        Covers both parameters and BatchNorm running statistics.
+        """
+        mu = self.EMA_MOMENTUM
+        # state_dict includes both learnable parameters and BN running stats
+        for (s_name, s_val), (_, t_val) in zip(
+            self.student_decoder.state_dict().items(),
+            self.teacher_decoder.state_dict().items(),
+        ):
+            # num_batches_tracked is an integer counter; copy directly
+            if 'num_batches_tracked' in s_name:
+                t_val.copy_(s_val)
+            else:
+                t_val.mul_(mu).add_(s_val, alpha=1.0 - mu)
+
+    def inference(self, x: torch.Tensor) -> torch.Tensor:
+        """Single-image inference using student encoder + decoder only."""
+        with torch.no_grad():
+            e1, e2, e3, e4, e5 = self.encoder(x)
+            enhanced, _ = self.student_decoder(e1, e2, e3, e4, e5, x)
+        return enhanced
