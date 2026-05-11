@@ -44,3 +44,82 @@ class Encoder(nn.Module):
         e4 = self.enc4(e3)
         e5 = self.enc5(e4)
         return e1, e2, e3, e4, e5
+
+
+class DecoderBlock(nn.Module):
+    """Single decoder level: ConvTranspose(stride=2) → BN → ReLU → Concat(skip) → CBAM.
+
+    Returns concatenated+attended feature map of (out_ch + skip_ch) channels.
+    """
+
+    def __init__(self, in_ch: int, out_ch: int, skip_ch: int):
+        super().__init__()
+        self.deconv = nn.ConvTranspose2d(
+            in_ch, out_ch, kernel_size=3, stride=2, padding=1, output_padding=1, bias=False
+        )
+        self.bn = nn.BatchNorm2d(out_ch)
+        self.act = nn.ReLU(inplace=True)
+        self.cbam = CBAM(out_ch + skip_ch)
+
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.act(self.bn(self.deconv(x)))   # (B, out_ch, H*2, W*2)
+        x = torch.cat([x, skip], dim=1)          # (B, out_ch+skip_ch, H*2, W*2)
+        return self.cbam(x)
+
+
+class StudentDecoder(nn.Module):
+    """4-level U-Net decoder with CBAM, 1×1 projection convs, and residual output head.
+
+    Channel trace for 256×256 input:
+      d1: ConvTranspose(512→512) + cat(e4:512) = 1024ch @ H/16  →  u1: 256ch
+      d2: ConvTranspose(1024→256) + cat(e3:256) = 512ch @ H/8   →  u2: 128ch
+      d3: ConvTranspose(512→128) + cat(e2:128) = 256ch @ H/4    →  u3: 64ch
+      d4: ConvTranspose(256→64) + cat(e1:64) = 128ch @ H/2      →  u4: 32ch
+      d5: ConvTranspose(128→32) + cat(img:3) = 35ch @ H         →  out: 3ch
+
+    Returns: (output_image, [u1, u2, u3, u4])
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Decoder blocks
+        self.dec1 = DecoderBlock(512,  512, skip_ch=512)   # d1: 1024ch
+        self.dec2 = DecoderBlock(1024, 256, skip_ch=256)   # d2: 512ch
+        self.dec3 = DecoderBlock(512,  128, skip_ch=128)   # d3: 256ch
+        self.dec4 = DecoderBlock(256,  64,  skip_ch=64)    # d4: 128ch
+
+        # 1×1 projection convs — outputs used by IAML loss
+        self.proj1 = nn.Conv2d(1024, 256, kernel_size=1)   # u1
+        self.proj2 = nn.Conv2d(512,  128, kernel_size=1)   # u2
+        self.proj3 = nn.Conv2d(256,  64,  kernel_size=1)   # u3
+        self.proj4 = nn.Conv2d(128,  32,  kernel_size=1)   # u4
+
+        # Output head: upsample to full res, concat input image, residual prediction
+        self.up5   = nn.ConvTranspose2d(128, 32, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.act5  = nn.ReLU(inplace=True)
+        self.conv_out1 = nn.Conv2d(32 + 3, 32, kernel_size=3, padding=1)
+        self.act_out1  = nn.ReLU(inplace=True)
+        self.conv_out2 = nn.Conv2d(32, 3, kernel_size=3, padding=1)
+
+    def forward(self, e1, e2, e3, e4, e5, img):
+        # (B, C, H, W) shapes for 256×256 input shown in comments
+        d1 = self.dec1(e5, e4)          # (B, 1024, H/16, W/16)
+        u1 = self.proj1(d1)             # (B, 256,  H/16, W/16)
+
+        d2 = self.dec2(d1, e3)          # (B, 512,  H/8,  W/8)
+        u2 = self.proj2(d2)             # (B, 128,  H/8,  W/8)
+
+        d3 = self.dec3(d2, e2)          # (B, 256,  H/4,  W/4)
+        u3 = self.proj3(d3)             # (B, 64,   H/4,  W/4)
+
+        d4 = self.dec4(d3, e1)          # (B, 128,  H/2,  W/2)
+        u4 = self.proj4(d4)             # (B, 32,   H/2,  W/2)
+
+        # Output head
+        d5 = self.act5(self.up5(d4))    # (B, 32,   H,    W)
+        d5 = torch.cat([d5, img], dim=1)# (B, 35,   H,    W)
+        out = self.act_out1(self.conv_out1(d5))   # (B, 32, H, W)
+        out = self.conv_out2(out)                  # (B, 3,  H, W)
+        out = torch.sigmoid(out + img)             # residual + sigmoid
+
+        return out, [u1, u2, u3, u4]
