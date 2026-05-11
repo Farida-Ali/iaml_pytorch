@@ -19,6 +19,15 @@ import torch
 from PIL import Image
 
 
+def load_image(path: str) -> torch.Tensor:
+    """Load image as (1, 3, H, W) float32 tensor in [0, 1]. PIL only, no cv2."""
+    img = Image.open(path).convert('RGB')
+    img_np = np.array(img).astype(np.float32) / 255.0
+    img_t  = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0)
+    # shape: (1, 3, H, W), range [0,1], float32
+    return img_t
+
+
 def compute_extra_metrics(enhanced_dir: str, gt_dir: str, output_csv: str) -> None:
     import pyiqa
 
@@ -44,15 +53,8 @@ def compute_extra_metrics(enhanced_dir: str, gt_dir: str, output_csv: str) -> No
 
     for i, fname in enumerate(filenames, 1):
         # Load images (saved as 8-bit PNG by basicsr/test.py)
-        enh_pil = Image.open(os.path.join(enhanced_dir, fname)).convert('RGB')
-        gt_pil  = Image.open(os.path.join(gt_dir,       fname)).convert('RGB')
-
-        enh_np = np.array(enh_pil, dtype=np.float32) / 255.0
-        gt_np  = np.array(gt_pil,  dtype=np.float32) / 255.0
-
-        # (B, C, H, W) float tensors in [0, 1]
-        enh_t = torch.from_numpy(enh_np).permute(2, 0, 1).unsqueeze(0).to(device)
-        gt_t  = torch.from_numpy(gt_np).permute(2, 0, 1).unsqueeze(0).to(device)
+        enh_t = load_image(os.path.join(enhanced_dir, fname)).to(device)
+        gt_t  = load_image(os.path.join(gt_dir,       fname)).to(device)
 
         # LPIPS: rescale [0, 1] → [-1, 1]
         with torch.no_grad():

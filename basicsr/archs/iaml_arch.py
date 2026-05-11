@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from basicsr.archs.iaml_cbam import CBAM
 
 
@@ -207,9 +208,17 @@ class IAMLNet(nn.Module):
             else:
                 t_val.mul_(mu).add_(s_val, alpha=1.0 - mu)
 
+    def student_parameters(self):
+        """Parameters to be optimised (encoder + student decoder, no teacher)."""
+        return list(self.encoder.parameters()) + list(self.student_decoder.parameters())
+
     def inference(self, x: torch.Tensor) -> torch.Tensor:
-        """Single-image inference using student encoder + decoder only."""
+        """Single-image inference with automatic pad-to-multiple-of-32 and crop."""
+        _, _, H, W = x.shape
+        pad_h = (32 - H % 32) % 32
+        pad_w = (32 - W % 32) % 32
         with torch.no_grad():
-            e1, e2, e3, e4, e5 = self.encoder(x)
-            enhanced, _ = self.student_decoder(e1, e2, e3, e4, e5, x)
-        return enhanced
+            x_pad = F.pad(x, (0, pad_w, 0, pad_h), mode='reflect') if (pad_h or pad_w) else x
+            e1, e2, e3, e4, e5 = self.encoder(x_pad)
+            enhanced, _ = self.student_decoder(e1, e2, e3, e4, e5, x_pad)
+        return enhanced[:, :, :H, :W]
