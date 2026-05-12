@@ -73,7 +73,7 @@ class ImageCleanModel(BaseModel):
             print('Not using Automatic Mixed Precision')
                   
         # define network
-        self.mixing_flag = self.opt['train']['mixing_augs'].get('mixup', False)
+        self.mixing_flag = self.opt.get('train', {}).get('mixing_augs', {}).get('mixup', False)
         if self.mixing_flag:
             mixup_beta = self.opt['train']['mixing_augs'].get(
                 'mixup_beta', 1.2)
