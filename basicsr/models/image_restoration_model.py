@@ -221,16 +221,12 @@ class ImageCleanModel(BaseModel):
         if hasattr(self, 'net_g_ema'):
             self.net_g_ema.eval()
             with torch.no_grad():
-                pred = self.net_g_ema(img)
-            if isinstance(pred, list):
-                pred = pred[-1]
+                pred = self.net_g_ema.inference(img)
             self.output = pred
         else:
             self.net_g.eval()
             with torch.no_grad():
-                pred = self.net_g(img)
-            if isinstance(pred, list):
-                pred = pred[-1]
+                pred = self.net_g.inference(img)
             self.output = pred
             self.net_g.train()
 
