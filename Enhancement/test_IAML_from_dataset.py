@@ -100,26 +100,32 @@ s = x['network_g'].pop('type')
 ##########################
 
 
-# ── CHANGE 1: Load IAMLNet instead of RetinexFormer ──────────────────────────
-from basicsr.archs.iaml_arch import IAMLNet
+# ── CHANGE 1: Load IAMLNet or RetinexFormer depending on YAML network_g.type ─
+is_iaml = (s == 'IAMLNet')
 
-checkpoint = torch.load(weights, map_location='cpu')
-if 'params' in checkpoint:
-    state_dict = checkpoint['params']
-elif 'model_state_dict' in checkpoint:
-    state_dict = checkpoint['model_state_dict']
-elif 'state_dict' in checkpoint:
-    state_dict = checkpoint['state_dict']
+if is_iaml:
+    from basicsr.archs.iaml_arch import IAMLNet
+    checkpoint = torch.load(weights, map_location='cpu')
+    if 'params' in checkpoint:
+        state_dict = checkpoint['params']
+    elif 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    elif 'state_dict' in checkpoint:
+        state_dict = checkpoint['state_dict']
+    else:
+        state_dict = checkpoint
+    student_state = {k: v for k, v in state_dict.items()
+                     if not k.startswith('teacher_decoder')}
+    model_restoration = IAMLNet()
+    model_restoration.load_state_dict(student_state, strict=False)
 else:
-    state_dict = checkpoint
-
-# Filter out teacher decoder keys — not needed at inference time
-student_state = {k: v for k, v in state_dict.items()
-                 if not k.startswith('teacher_decoder')}
-
-model_restoration = IAMLNet()
-model_restoration.load_state_dict(student_state, strict=False)
+    model_restoration = create_model(opt).net_g
 # ─────────────────────────────────────────────────────────────────────────────
+
+# run_model(input_) works for both architectures:
+#   IAMLNet  → .inference() handles pad-to-32 internally
+#   others   → direct __call__ (Retinexformer pads to multiple of 4 above)
+run_model = model_restoration.inference if is_iaml else model_restoration
 
 print("===>Testing using weights: ", weights)
 model_restoration.cuda()
@@ -252,7 +258,7 @@ else:
                     restored = self_ensemble(input_, model_restoration)
                 else:
                     # ── CHANGE 2: use inference() ─────────────────────────
-                    restored = model_restoration.inference(input_)
+                    restored = run_model(input_)
                     # ─────────────────────────────────────────────────────
             else:
                 # split and test
@@ -263,8 +269,8 @@ else:
                     restored_2 = self_ensemble(input_2, model_restoration)
                 else:
                     # ── CHANGE 2: use inference() ─────────────────────────
-                    restored_1 = model_restoration.inference(input_1)
-                    restored_2 = model_restoration.inference(input_2)
+                    restored_1 = run_model(input_1)
+                    restored_2 = run_model(input_2)
                     # ─────────────────────────────────────────────────────
                 restored = torch.zeros_like(input_)
                 restored[:, :, :, 1::2] = restored_1
