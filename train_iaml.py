@@ -10,11 +10,13 @@ Usage:
 import argparse
 import os
 
+import cv2
+import math
 import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
-from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+from skimage import img_as_ubyte
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -25,12 +27,38 @@ from basicsr.losses.iaml_loss import TotalLoss
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def rgb_to_y(img_rgb: np.ndarray) -> np.ndarray:
-    """Convert RGB image (H,W,3) in [0,1] to Y channel of YCbCr (H,W)."""
-    return (16.0 / 255.0
-            + (65.481 / 255.0) * img_rgb[:, :, 0]
-            + (128.553 / 255.0) * img_rgb[:, :, 1]
-            + (24.966 / 255.0)  * img_rgb[:, :, 2])
+def _psnr_rgb(img1: np.ndarray, img2: np.ndarray) -> float:
+    """RGB PSNR on [0,1] float images — identical to Enhancement/utils.py::PSNR."""
+    mse = np.mean((img1 - img2) ** 2)
+    if mse == 0:
+        return 100.0
+    return 10.0 * math.log10(1.0 / mse)
+
+
+def _ssim_channel(img1: np.ndarray, img2: np.ndarray) -> float:
+    """Single-channel SSIM on [0,255] uint8 — identical to Enhancement/utils.py::ssim."""
+    C1 = (0.01 * 255) ** 2
+    C2 = (0.03 * 255) ** 2
+    img1 = img1.astype(np.float64)
+    img2 = img2.astype(np.float64)
+    kernel = cv2.getGaussianKernel(11, 1.5)
+    window = np.outer(kernel, kernel.transpose())
+    mu1 = cv2.filter2D(img1, -1, window)[5:-5, 5:-5]
+    mu2 = cv2.filter2D(img2, -1, window)[5:-5, 5:-5]
+    mu1_sq  = mu1 ** 2
+    mu2_sq  = mu2 ** 2
+    mu1_mu2 = mu1 * mu2
+    sigma1_sq = cv2.filter2D(img1 ** 2, -1, window)[5:-5, 5:-5] - mu1_sq
+    sigma2_sq = cv2.filter2D(img2 ** 2, -1, window)[5:-5, 5:-5] - mu2_sq
+    sigma12   = cv2.filter2D(img1 * img2, -1, window)[5:-5, 5:-5] - mu1_mu2
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / (
+               (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+    return float(ssim_map.mean())
+
+
+def _ssim_rgb(img1: np.ndarray, img2: np.ndarray) -> float:
+    """Per-channel-average SSIM on [0,255] uint8 — identical to Enhancement/utils.py::calculate_ssim."""
+    return float(np.mean([_ssim_channel(img1[:, :, i], img2[:, :, i]) for i in range(3)]))
 
 
 def pad_to_multiple(x: torch.Tensor, multiple: int = 32) -> tuple:
@@ -50,7 +78,11 @@ def load_opt(opt_path: str) -> dict:
 # ── Validation ────────────────────────────────────────────────────────────────
 
 def validate(model: IAMLNet, val_loader, device: torch.device) -> tuple:
-    """Compute mean PSNR and SSIM on Y channel at full native resolution."""
+    """Compute mean PSNR and SSIM matching test_IAML_from_dataset.py exactly.
+
+    PSNR: utils.PSNR on [0,1] float RGB (all 3 channels).
+    SSIM: utils.calculate_ssim on [0,255] uint8 RGB (per-channel average).
+    """
     psnr_list, ssim_list = [], []
 
     with torch.no_grad():
@@ -64,16 +96,11 @@ def validate(model: IAMLNet, val_loader, device: torch.device) -> tuple:
             enhanced = model.inference(lq_padded)
             enhanced = enhanced[:, :, :H, :W].clamp(0.0, 1.0)
 
-            enhanced_np = enhanced.squeeze(0).permute(1, 2, 0).cpu().numpy()
-            clean_np    = gt.squeeze(0).permute(1, 2, 0).cpu().numpy()
+            enhanced_np = enhanced.squeeze(0).permute(1, 2, 0).cpu().numpy().astype(np.float32)
+            clean_np    = gt.squeeze(0).permute(1, 2, 0).cpu().numpy().astype(np.float32)
 
-            enh_y   = rgb_to_y(enhanced_np)
-            clean_y = rgb_to_y(clean_np)
-
-            psnr_list.append(
-                peak_signal_noise_ratio(clean_y, enh_y, data_range=1.0))
-            ssim_list.append(
-                structural_similarity(clean_y, enh_y, data_range=1.0))
+            psnr_list.append(_psnr_rgb(clean_np, enhanced_np))
+            ssim_list.append(_ssim_rgb(img_as_ubyte(clean_np), img_as_ubyte(enhanced_np)))
 
     return float(np.mean(psnr_list)), float(np.mean(ssim_list))
 
