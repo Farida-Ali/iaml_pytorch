@@ -123,9 +123,9 @@ class StudentDecoder(nn.Module):
         # Output head
         d5 = self.act5(self.up5(d4))    # (B, 32,   H,    W)
         d5 = torch.cat([d5, img], dim=1)# (B, 35,   H,    W)
-        out = self.act_out1(self.conv_out1(d5))   # (B, 32, H, W)
-        out = self.conv_out2(out)                  # (B, 3,  H, W)
-        out = torch.sigmoid(out + img)             # residual + sigmoid
+        out = self.act_out1(self.conv_out1(d5))         # (B, 32, H, W)
+        residual = self.conv_out2(out)               # (B, 3,  H, W)
+        out = torch.clamp(img + residual, 0.0, 1.0)  # residual + clamp
 
         return out, [u1, u2, u3, u4]
 

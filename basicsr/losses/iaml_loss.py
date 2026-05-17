@@ -84,10 +84,16 @@ class SSIMLoss(nn.Module):
         return 1.0 - ssim_val
 
 
-class TotalLoss(nn.Module):
-    """L_total = L_MSE + L_SSIM + 0.8 * L_IAML.
+def charbonnier_loss(pred: torch.Tensor, target: torch.Tensor,
+                     eps: float = 1e-3) -> torch.Tensor:
+    diff = pred - target
+    return torch.mean(torch.sqrt(diff * diff + eps * eps))
 
-    Returns a dict with keys: 'total', 'mse', 'ssim', 'iaml'.
+
+class TotalLoss(nn.Module):
+    """L_total = L_Charb + L_SSIM + 0.8 * L_IAML.
+
+    Returns a dict with keys: 'total', 'charb', 'ssim', 'iaml'.
     """
 
     def __init__(self):
@@ -97,12 +103,12 @@ class TotalLoss(nn.Module):
 
     def forward(self, enhanced: torch.Tensor, clean: torch.Tensor,
                 pairs: list, x_low: torch.Tensor) -> dict:
-        mse  = F.mse_loss(enhanced, clean)
-        ssim = self.ssim_loss(enhanced, clean)
-        iaml = self.iaml_loss(pairs, x_low)
+        charb = charbonnier_loss(enhanced, clean, eps=1e-3)
+        ssim  = self.ssim_loss(enhanced, clean)
+        iaml  = self.iaml_loss(pairs, x_low)
         return {
-            'total': mse + ssim + 0.8 * iaml,
-            'mse':   mse,
+            'total': charb + ssim + 0.8 * iaml,
+            'charb': charb,
             'ssim':  ssim,
             'iaml':  iaml,
         }

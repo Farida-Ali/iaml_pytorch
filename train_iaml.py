@@ -210,7 +210,7 @@ def train(args):
             if iteration % print_freq == 0 or iteration == 1:
                 print(f"Epoch {epoch:04d} | Iter {iteration:06d}/{total_iter} | "
                       f"Total: {loss_dict['total'].item():.4f} | "
-                      f"MSE: {loss_dict['mse'].item():.4f} | "
+                      f"Charb: {loss_dict['charb'].item():.4f} | "
                       f"SSIM: {loss_dict['ssim'].item():.4f} | "
                       f"IAML: {loss_dict['iaml'].item():.4f}")
 
@@ -290,9 +290,9 @@ def smoke_test():
     except Exception as e:
         results[2] = ('FAIL', str(e))
 
-    # ── Check 3: total = MSE + SSIM + 0.8×IAML ───────────────────────────────
+    # ── Check 3: total = Charb + SSIM + 0.8×IAML ────────────────────────────
     try:
-        expected = loss_dict['mse'] + loss_dict['ssim'] + 0.8 * loss_dict['iaml']
+        expected = loss_dict['charb'] + loss_dict['ssim'] + 0.8 * loss_dict['iaml']
         assert torch.allclose(loss_dict['total'], expected, atol=1e-5), (
             f"total={loss_dict['total'].item():.6f} expected={expected.item():.6f}")
         results[3] = ('PASS', f"total={loss_dict['total'].item():.6f}")
