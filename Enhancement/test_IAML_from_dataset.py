@@ -194,7 +194,7 @@ if dataset in ['SID', 'SMID', 'SDSD_indoor', 'SDSD_outdoor']:
             input_ = F.pad(input_, (0, padw, 0, padh), 'reflect')
 
             if args.self_ensemble:
-                restored = self_ensemble(input_, model_restoration)
+                restored = self_ensemble(input_, run_model)
             else:
                 restored = run_model(input_)
 
@@ -259,7 +259,7 @@ else:
 
             if h < 3000 and w < 3000:
                 if args.self_ensemble:
-                    restored = self_ensemble(input_, model_restoration)
+                    restored = self_ensemble(input_, run_model)
                 else:
                     # ── CHANGE 2: use inference() ─────────────────────────
                     restored = run_model(input_)
@@ -269,8 +269,8 @@ else:
                 input_1 = input_[:, :, :, 1::2]
                 input_2 = input_[:, :, :, 0::2]
                 if args.self_ensemble:
-                    restored_1 = self_ensemble(input_1, model_restoration)
-                    restored_2 = self_ensemble(input_2, model_restoration)
+                    restored_1 = self_ensemble(input_1, run_model)
+                    restored_2 = self_ensemble(input_2, run_model)
                 else:
                     # ── CHANGE 2: use inference() ─────────────────────────
                     restored_1 = run_model(input_1)
