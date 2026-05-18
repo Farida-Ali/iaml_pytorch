@@ -120,6 +120,12 @@ if is_iaml:
     model_restoration.load_state_dict(student_state, strict=False)
 else:
     model_restoration = create_model(opt).net_g
+    checkpoint = torch.load(weights, map_location='cpu')
+    try:
+        model_restoration.load_state_dict(checkpoint['params'])
+    except Exception:
+        prefixed = {'module.' + k: v for k, v in checkpoint['params'].items()}
+        model_restoration.load_state_dict(prefixed)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # run_model(input_) works for both architectures:
@@ -190,9 +196,7 @@ if dataset in ['SID', 'SMID', 'SDSD_indoor', 'SDSD_outdoor']:
             if args.self_ensemble:
                 restored = self_ensemble(input_, model_restoration)
             else:
-                # ── CHANGE 2: use inference() ─────────────────────────────
-                restored = model_restoration.inference(input_)
-                # ─────────────────────────────────────────────────────────
+                restored = run_model(input_)
 
             # Unpad images to original dimensions
             restored = restored[:, :, :h, :w]
