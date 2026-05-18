@@ -1,24 +1,211 @@
 """
 Compute FLOPs, parameters, and inference time for IAML and RetinexFormer.
 
-Addresses reviewer comment on computational complexity.
+Uses the SAME my_summary() method as Retinexformer's official repo so that
+numbers are directly comparable for paper tables.
 
-Usage (CPU, for parameter counting only):
-    python3 compute_complexity.py
+Reference: Enhancement/utils.py → my_summary(model, H, W, C, N)
+  - FLOPs counted by fvcore.nn.FlopCountAnalysis
+  - Divided by 1024**3 → "GMac" (their naming; actually GFlops)
 
-Usage (GPU, for full timing benchmark):
+Requires GPU + fvcore:
+    pip install fvcore
     python3 compute_complexity.py --gpu
 
-Output example:
-    ┌──────────────────────────────────────────────────────────────────────┐
-    │                  Complexity Report @ 600×400 input                  │
-    ├────────────────┬────────────┬────────────┬──────────┬───────────────┤
-    │ Model          │ Train Params│ Infer Params│ GMACs   │ Infer Time ms │
-    ├────────────────┼────────────┼────────────┼──────────┼───────────────┤
-    │ RetinexFormer  │   1.61 M   │   1.61 M   │  15.57 G │         X ms  │
-    │ IAML (ours)    │   X.XX M   │   X.XX M   │  XX.XX G │         X ms  │
-    └────────────────┴────────────┴────────────┴──────────┴───────────────┘
+CPU-only (params only, no FLOPs):
+    python3 compute_complexity.py
 """
+import argparse
+import sys
+import os
+import time
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--gpu',    action='store_true', help='Use CUDA (required for FLOPs + timing)')
+parser.add_argument('--height', type=int, default=256, help='Input height (default: 256, same as Retinexformer paper)')
+parser.add_argument('--width',  type=int, default=256, help='Input width  (default: 256)')
+parser.add_argument('--warmup', type=int, default=20,  help='Warm-up iterations for timing')
+parser.add_argument('--reps',   type=int, default=100, help='Timing repetitions')
+args = parser.parse_args()
+
+device = torch.device('cuda' if (args.gpu and torch.cuda.is_available()) else 'cpu')
+if args.gpu and device.type == 'cpu':
+    print("WARNING: --gpu requested but no CUDA available. Falling back to CPU (no FLOPs).")
+H, W = args.height, args.width
+print(f"\nDevice: {device}   Input: {H}×{W}\n")
+
+# ── Try to import fvcore (same as my_summary) ────────────────────────────────
+try:
+    from fvcore.nn import FlopCountAnalysis
+    HAS_FVCORE = True
+except ImportError:
+    HAS_FVCORE = False
+    print("WARNING: fvcore not installed → FLOPs will be skipped.")
+    print("         Install with: pip install fvcore")
+    print("         FLOPs are required for fair comparison with Retinexformer.\n")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# my_summary — identical logic to Enhancement/utils.py
+# (GPU required; FlopCountAnalysis does not support CPU for all ops)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def my_summary(model, H=256, W=256, C=3, N=1):
+    """Exact replica of Retinexformer's my_summary() for fair comparison."""
+    if not HAS_FVCORE:
+        return float('nan')
+    if device.type == 'cpu':
+        print("  [FLOPs] Skipped — fvcore requires CUDA. Run with --gpu.")
+        return float('nan')
+    inputs = torch.randn((N, C, H, W)).to(device)
+    flops = FlopCountAnalysis(model, inputs)
+    flops.unsupported_ops_warnings(False)
+    flops.uncalled_modules_warnings(False)
+    gmac = flops.total() / (1024 ** 3)   # matches their exact divisor
+    return gmac
+
+
+def count_params(model):
+    total     = sum(p.nelement() for p in model.parameters())
+    trainable = sum(p.nelement() for p in model.parameters() if p.requires_grad)
+    return total, trainable
+
+
+def measure_time_ms(fn, h, w, warmup, reps):
+    if device.type == 'cpu':
+        return float('nan'), float('nan')
+    x = torch.randn(1, 3, h, w).to(device)
+    with torch.no_grad():
+        for _ in range(warmup):
+            fn(x)
+    torch.cuda.synchronize()
+    times = []
+    with torch.no_grad():
+        for _ in range(reps):
+            s = torch.cuda.Event(enable_timing=True)
+            e = torch.cuda.Event(enable_timing=True)
+            s.record(); fn(x); e.record()
+            torch.cuda.synchronize()
+            times.append(s.elapsed_time(e))
+    return float(np.mean(times)), float(np.std(times))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IAML
+# ─────────────────────────────────────────────────────────────────────────────
+
+print("=" * 60)
+print("IAML (ours)")
+print("=" * 60)
+
+from basicsr.archs.iaml_arch import IAMLNet
+
+iaml = IAMLNet().to(device).eval()
+total_iaml, trainable_iaml = count_params(iaml)
+infer_iaml = sum(p.numel() for n, p in iaml.named_parameters()
+                 if not n.startswith('teacher_decoder'))
+teacher_iaml = total_iaml - infer_iaml
+
+print(f"  Total params  (enc + student + teacher): {total_iaml:>10,}  ({total_iaml/1e6:.3f} M)")
+print(f"  Trainable     (enc + student, teacher frozen): {trainable_iaml:>10,}  ({trainable_iaml/1e6:.3f} M)")
+print(f"  Inference     (enc + student, teacher absent): {infer_iaml:>10,}  ({infer_iaml/1e6:.3f} M)")
+print(f"  Teacher only  (frozen, not used at inference): {teacher_iaml:>10,}  ({teacher_iaml/1e6:.3f} M)")
+
+# Wrap inference path (no teacher) for FlopCountAnalysis
+class IAMLInferenceWrapper(nn.Module):
+    def __init__(self, m):
+        super().__init__()
+        self.encoder = m.encoder
+        self.student_decoder = m.student_decoder
+    def forward(self, x):
+        e1, e2, e3, e4, e5 = self.encoder(x)
+        out, _ = self.student_decoder(e1, e2, e3, e4, e5, x)
+        return out
+
+# Pad H,W to multiple of 32 for the inference wrapper
+h32 = H + (32 - H % 32) % 32
+w32 = W + (32 - W % 32) % 32
+iaml_infer = IAMLInferenceWrapper(iaml).to(device)
+gmac_iaml = my_summary(iaml_infer, H=h32, W=w32)
+if not np.isnan(gmac_iaml):
+    print(f"  GFlops (fvcore, {h32}×{w32}): {gmac_iaml:.3f}  [same tool as Retinexformer]")
+
+t_iaml, s_iaml = measure_time_ms(iaml.inference, H, W, args.warmup, args.reps)
+if not np.isnan(t_iaml):
+    print(f"  Inference time ({args.reps} reps, {H}×{W}): {t_iaml:.2f} ± {s_iaml:.2f} ms")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RetinexFormer — using my_summary exactly as their repo does
+# ─────────────────────────────────────────────────────────────────────────────
+
+print()
+print("=" * 60)
+print("RetinexFormer")
+print("=" * 60)
+
+try:
+    from basicsr.utils.options import parse
+    from basicsr.models import create_model
+
+    opt = parse('Options/RetinexFormer_LOL_v1.yml', is_train=False)
+    opt['dist'] = False
+    opt['num_gpu'] = 1 if device.type == 'cuda' else 0
+    retinex = create_model(opt).net_g.to(device).eval()
+
+    total_ret, _ = count_params(retinex)
+    print(f"  Params: {total_ret:>10,}  ({total_ret/1e6:.3f} M)")
+
+    # This is exactly how Retinexformer's README says to call it:
+    #   from utils import my_summary
+    #   my_summary(RetinexFormer(), 256, 256, 3, 1)
+    gmac_ret = my_summary(retinex, H=H, W=W)
+    if not np.isnan(gmac_ret):
+        print(f"  GFlops (fvcore, {H}×{W}): {gmac_ret:.3f}  [same tool as Retinexformer]")
+
+    t_ret, s_ret = measure_time_ms(retinex, H, W, args.warmup, args.reps)
+    if not np.isnan(t_ret):
+        print(f"  Inference time ({args.reps} reps, {H}×{W}): {t_ret:.2f} ± {s_ret:.2f} ms")
+
+except Exception as e:
+    total_ret = gmac_ret = t_ret = s_ret = float('nan')
+    print(f"  Skipped: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Summary table
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fm(v): return f"{v/1e6:.2f} M"   if not np.isnan(v) else "  N/A  "
+def fg(v): return f"{v:.2f} G"       if not np.isnan(v) else "  N/A  "
+def ft(v): return f"{v:.1f} ms"      if not np.isnan(v) else "  N/A  "
+
+print()
+print("┌" + "─"*74 + "┐")
+print(f"│{'Complexity @ ' + str(H) + '×' + str(W) + '  (fvcore = same tool as Retinexformer)':^74}│")
+print("├" + "─"*18 + "┬" + "─"*12 + "┬" + "─"*12 + "┬" + "─"*14 + "┬" + "─"*14 + "┤")
+print(f"│{'Model':<18}│{'Infer Params':^12}│{'Train Params':^12}│{'GFlops(fvcore)':^14}│{'Infer Time':^14}│")
+print("├" + "─"*18 + "┼" + "─"*12 + "┼" + "─"*12 + "┼" + "─"*14 + "┼" + "─"*14 + "┤")
+print(f"│{'RetinexFormer':<18}│{fm(total_ret):^12}│{fm(total_ret):^12}│{fg(gmac_ret):^14}│{ft(t_ret):^14}│")
+print(f"│{'IAML (ours)':<18}│{fm(infer_iaml):^12}│{fm(trainable_iaml):^12}│{fg(gmac_iaml):^14}│{ft(t_iaml):^14}│")
+print("└" + "─"*18 + "┴" + "─"*12 + "┴" + "─"*12 + "┴" + "─"*14 + "┴" + "─"*14 + "┘")
+
+print()
+print("Notes:")
+print("  • GFlops measured by fvcore.FlopCountAnalysis (same as Retinexformer repo)")
+print("    Retinexformer calls it 'GMac' in utils.py but the tool counts FLOPs.")
+print("  • IAML FLOPs measured on inference path only (encoder + student decoder).")
+print("    Input padded to multiple of 32 for IAML's encoder requirement.")
+print("  • 'Infer Params': weights present and used during inference.")
+print("  • 'Train Params': weights with requires_grad=True (teacher is frozen).")
+print("  • For the paper: report 'Infer Params' and GFlops in the comparison table.")
+if device.type == 'cpu':
+    print("\n  *** Re-run with --gpu on your training machine for actual numbers. ***")
+    print("  *** fvcore requires CUDA; CPU results show params only.           ***")
+
 import argparse
 import time
 import sys
