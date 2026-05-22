@@ -1,35 +1,22 @@
 """
-FD²RT A2 — DDA_Block (spatial-illumination branch only) + W-IE.
-================================================================
-Ablation A2 adds Restormer's Gated Depth-wise Feed-Forward Network (GDFN)
-and proper Pre-LayerNorm on the attention path.  The spatial attention
-mechanism (DDA_MSA) is byte-for-byte equivalent to Retinexformer's IG-MSA
-so that the only controlled variable versus A1 is the FFN.
+FD²RT A2 — DDA_Block (spatial branch, original FFN) + W-IE.
+============================================================
+GDFN has been dropped in favour of Retinexformer's original FeedForward.
+DDA_MSA is byte-for-byte identical to IG_MSA.  DDA_Block is therefore
+structurally identical to IGAB — same nn.ModuleList layout, same key
+names, same forward pass — making it a verified drop-in replacement
+that loads cleanly from an A1 (FD2RT_V1 / W-IE + IGAB) checkpoint.
 
-Changes vs A1 (FD2RT_V1):
-  • FeedForward (double-GELU, mult=4) → GDFN (gated, gamma=2.66)
-  • Pre-LN added before attention  (IGAB had no pre-LN on the attn path)
-  • N_map still computed by W-IE but not yet consumed (Phase 2 will use it)
-
-Non-goals (Phase 2):
-  • No frequency branch in DDA_MSA
-  • No N_map usage in DDA_MSA
+Key layout (matches IGAB exactly):
+  blocks[i][0]  DDA_MSA       ≡ IG_MSA
+  blocks[i][1]  PreNorm(FFN)  ≡ PreNorm(FeedForward)
 
 Registered name: FD2RT_A2
-Config entry point:
-    network_g:
-      type: FD2RT_A2
-      in_channels: 3
-      out_channels: 3
-      n_feat: 40
-      stage: 1
-      num_blocks: [1, 2, 2]
 """
 
-import sys
-import os
-import math
-import warnings
+import sys, os, math, warnings
+from einops import rearrange
+from torch.nn.init import _calculate_fan_in_and_fan_out
 
 _REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..', '..', '..')
@@ -40,21 +27,23 @@ if _REPO_ROOT not in sys.path:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
-from torch.nn.init import _calculate_fan_in_and_fan_out
 
-from basicsr.models.archs.RetinexFormer_arch import RetinexFormer
+from basicsr.models.archs.RetinexFormer_arch import (
+    RetinexFormer,
+    PreNorm,
+    FeedForward,
+    GELU,
+)
 from fd2rt_arch import WaveletIlluminationEstimator
 
 
-# ── Weight-init helpers (copied from RetinexFormer_arch.py) ──────────── #
+# ── Weight-init (same as Retinexformer) ────────────────────────────────── #
 
 def _no_grad_trunc_normal_(tensor, mean, std, a, b):
     def norm_cdf(x):
         return (1. + math.erf(x / math.sqrt(2.))) / 2.
     if (mean < a - 2 * std) or (mean > b + 2 * std):
-        warnings.warn("mean is more than 2 std from [a, b] in nn.init.trunc_normal_.",
-                      stacklevel=2)
+        warnings.warn("mean is more than 2 std from [a, b].", stacklevel=2)
     with torch.no_grad():
         l = norm_cdf((a - mean) / std)
         u = norm_cdf((b - mean) / std)
@@ -70,33 +59,20 @@ def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
     return _no_grad_trunc_normal_(tensor, mean, std, a, b)
 
 
-class GELU(nn.Module):
-    def forward(self, x):
-        return F.gelu(x)
-
-
-# ── DDA_MSA  (= IG_MSA, byte-for-byte equivalent) ─────────────────────── #
+# ── DDA_MSA  (= IG_MSA, byte-for-byte copy) ────────────────────────────── #
 
 class DDA_MSA(nn.Module):
-    """
-    Illumination-Guided Multi-head Self-Attention — identical to IG_MSA.
-    The frequency branch will be added here in Phase 2 (A3+).
-
-    Args:
-        dim      (int): token channel dimension
-        dim_head (int): per-head dimension
-        heads    (int): number of attention heads
-    """
+    """Spatial self-attention — identical to IG_MSA in every detail."""
 
     def __init__(self, dim: int, dim_head: int = 64, heads: int = 8) -> None:
         super().__init__()
         self.num_heads = heads
-        self.dim_head = dim_head
-        self.to_q = nn.Linear(dim, dim_head * heads, bias=False)
-        self.to_k = nn.Linear(dim, dim_head * heads, bias=False)
-        self.to_v = nn.Linear(dim, dim_head * heads, bias=False)
+        self.dim_head  = dim_head
+        self.to_q  = nn.Linear(dim, dim_head * heads, bias=False)
+        self.to_k  = nn.Linear(dim, dim_head * heads, bias=False)
+        self.to_v  = nn.Linear(dim, dim_head * heads, bias=False)
         self.rescale = nn.Parameter(torch.ones(heads, 1, 1))
-        self.proj = nn.Linear(dim_head * heads, dim, bias=True)
+        self.proj  = nn.Linear(dim_head * heads, dim, bias=True)
         self.pos_emb = nn.Sequential(
             nn.Conv2d(dim, dim, 3, 1, 1, bias=False, groups=dim),
             GELU(),
@@ -105,11 +81,7 @@ class DDA_MSA(nn.Module):
         self.dim = dim
 
     def forward(self, x_in, illu_fea_trans):
-        """
-        x_in:           [b, h, w, c]   pre-normed input tokens
-        illu_fea_trans: [b, h, w, c]   illumination guidance (not normed)
-        Returns:        [b, h, w, c]
-        """
+        """x_in: [b,h,w,c]  illu_fea_trans: [b,h,w,c]  →  [b,h,w,c]"""
         b, h, w, c = x_in.shape
         x = x_in.reshape(b, h * w, c)
         q_inp = self.to_q(x)
@@ -126,12 +98,10 @@ class DDA_MSA(nn.Module):
         v = v.transpose(-2, -1)
         q = F.normalize(q, dim=-1, p=2)
         k = F.normalize(k, dim=-1, p=2)
-        attn = (k @ q.transpose(-2, -1))   # K^T Q
-        attn = attn * self.rescale
+        attn = (k @ q.transpose(-2, -1)) * self.rescale
         attn = attn.softmax(dim=-1)
-        x = attn @ v                        # [b, heads, d, hw]
-        x = x.permute(0, 3, 1, 2)
-        x = x.reshape(b, h * w, self.num_heads * self.dim_head)
+        x = attn @ v
+        x = x.permute(0, 3, 1, 2).reshape(b, h * w, self.num_heads * self.dim_head)
         out_c = self.proj(x).view(b, h, w, c)
         out_p = self.pos_emb(
             v_inp.reshape(b, h, w, c).permute(0, 3, 1, 2)
@@ -139,111 +109,42 @@ class DDA_MSA(nn.Module):
         return out_c + out_p
 
 
-# ── GDFN (Restormer Eq. 2) ─────────────────────────────────────────────── #
-
-class GDFN(nn.Module):
-    """
-    Gated Depth-wise Feed-Forward Network (Restormer, Eq. 2):
-
-        out = W_out · ( GELU(W1_dw W1_pw  x)  ⊙  W2_dw W2_pw  x )
-
-    Implemented with a shared project_in for both branches (standard
-    Restormer style): project_in → depthwise → chunk → gate → project_out.
-
-    Args:
-        dim   (int):   input/output channel count
-        gamma (float): hidden-to-dim expansion ratio (Restormer default 2.66)
-    """
-
-    def __init__(self, dim: int, gamma: float = 2.66) -> None:
-        super().__init__()
-        hidden = int(dim * gamma)
-        # shared pointwise for both branches
-        self.project_in = nn.Conv2d(dim, hidden * 2, 1, bias=False)
-        # shared depthwise for both branches
-        self.dw_conv = nn.Conv2d(
-            hidden * 2, hidden * 2, 3, 1, 1, bias=False, groups=hidden * 2
-        )
-        # output projection after gating
-        self.project_out = nn.Conv2d(hidden, dim, 1, bias=False)
-
-    def forward(self, x):
-        """x: [b, h, w, c] → [b, h, w, c]"""
-        x_c = x.permute(0, 3, 1, 2).contiguous()   # [b, c, h, w]
-        x_c = self.project_in(x_c)                  # [b, 2·hidden, h, w]
-        x_c = self.dw_conv(x_c)
-        x1, x2 = x_c.chunk(2, dim=1)               # each [b, hidden, h, w]
-        out = F.gelu(x1) * x2
-        out = self.project_out(out)                  # [b, dim, h, w]
-        return out.permute(0, 2, 3, 1)              # [b, h, w, c]
-
-
 # ── DDA_Block ──────────────────────────────────────────────────────────── #
 
 class DDA_Block(nn.Module):
     """
-    Dual-Domain Attention Block — Phase 2, spatial branch only.
-    Drop-in replacement for IGAB.
-
-    Each inner block:   LN → DDA_MSA → (residual)  →  LN → GDFN → (residual)
-
-    Args:
-        dim        (int):   channel dimension
-        dim_head   (int):   per-head size
-        heads      (int):   number of heads
-        num_blocks (int):   number of (attn, ffn) pairs stacked inside
-        gamma      (float): GDFN channel expansion factor
+    IGAB-equivalent with DDA_MSA.  Module layout is byte-for-byte identical
+    to IGAB so checkpoint keys are interchangeable:
+      blocks[i][0]  DDA_MSA           (same keys as IG_MSA)
+      blocks[i][1]  PreNorm(FFN)      (same keys as PreNorm(FeedForward))
     """
 
-    def __init__(
-        self,
-        dim: int,
-        dim_head: int = 64,
-        heads: int = 8,
-        num_blocks: int = 2,
-        gamma: float = 2.66,
-    ) -> None:
+    def __init__(self, dim: int, dim_head: int = 64, heads: int = 8,
+                 num_blocks: int = 2) -> None:
         super().__init__()
         self.blocks = nn.ModuleList()
         for _ in range(num_blocks):
             self.blocks.append(nn.ModuleList([
-                nn.LayerNorm(dim),                                        # pre-LN attn
                 DDA_MSA(dim=dim, dim_head=dim_head, heads=heads),
-                nn.LayerNorm(dim),                                        # pre-LN FFN
-                GDFN(dim=dim, gamma=gamma),
+                PreNorm(dim, FeedForward(dim=dim)),
             ]))
 
     def forward(self, x, illu_fea):
-        """
-        x:        [b, c, h, w]
-        illu_fea: [b, c, h, w]
-        Returns:  [b, c, h, w]
-        """
-        x = x.permute(0, 2, 3, 1)                        # [b, h, w, c]
-        illu_fea_t = illu_fea.permute(0, 2, 3, 1)        # [b, h, w, c]
-        for (ln1, attn, ln2, ff) in self.blocks:
-            x = attn(ln1(x), illu_fea_trans=illu_fea_t) + x
-            x = ff(ln2(x)) + x
-        return x.permute(0, 3, 1, 2)                      # [b, c, h, w]
+        """x: [b,c,h,w]  illu_fea: [b,c,h,w]  →  [b,c,h,w]"""
+        x = x.permute(0, 2, 3, 1)
+        for (attn, ff) in self.blocks:
+            x = attn(x, illu_fea_trans=illu_fea.permute(0, 2, 3, 1)) + x
+            x = ff(x) + x
+        return x.permute(0, 3, 1, 2)
 
 
 # ── DDA_Denoiser ───────────────────────────────────────────────────────── #
 
 class DDA_Denoiser(nn.Module):
-    """
-    Denoiser with every IGAB replaced by DDA_Block.
-    Architecture (encoder → bottleneck → decoder) is identical to Retinexformer.
-    """
+    """Denoiser with every IGAB replaced by DDA_Block (structurally identical)."""
 
-    def __init__(
-        self,
-        in_dim: int = 3,
-        out_dim: int = 3,
-        dim: int = 31,
-        level: int = 2,
-        num_blocks: list = None,
-        gamma: float = 2.66,
-    ) -> None:
+    def __init__(self, in_dim=3, out_dim=3, dim=31, level=2,
+                 num_blocks=None) -> None:
         if num_blocks is None:
             num_blocks = [2, 4, 4]
         super().__init__()
@@ -252,45 +153,30 @@ class DDA_Denoiser(nn.Module):
 
         self.embedding = nn.Conv2d(in_dim, dim, 3, 1, 1, bias=False)
 
-        # Encoder
         self.encoder_layers = nn.ModuleList()
         dim_level = dim
         for i in range(level):
             self.encoder_layers.append(nn.ModuleList([
-                DDA_Block(
-                    dim=dim_level,
-                    num_blocks=num_blocks[i],
-                    dim_head=dim,
-                    heads=dim_level // dim,
-                    gamma=gamma,
-                ),
-                nn.Conv2d(dim_level, dim_level * 2, 4, 2, 1, bias=False),   # feature down
-                nn.Conv2d(dim_level, dim_level * 2, 4, 2, 1, bias=False),   # illu down
+                DDA_Block(dim=dim_level, num_blocks=num_blocks[i],
+                          dim_head=dim, heads=dim_level // dim),
+                nn.Conv2d(dim_level, dim_level * 2, 4, 2, 1, bias=False),
+                nn.Conv2d(dim_level, dim_level * 2, 4, 2, 1, bias=False),
             ]))
             dim_level *= 2
 
-        # Bottleneck
         self.bottleneck = DDA_Block(
-            dim=dim_level,
-            num_blocks=num_blocks[-1],
-            dim_head=dim,
-            heads=dim_level // dim,
-            gamma=gamma,
+            dim=dim_level, num_blocks=num_blocks[-1],
+            dim_head=dim, heads=dim_level // dim,
         )
 
-        # Decoder
         self.decoder_layers = nn.ModuleList()
         for i in range(level):
             self.decoder_layers.append(nn.ModuleList([
-                nn.ConvTranspose2d(dim_level, dim_level // 2, 2, 2, 0, output_padding=0),
+                nn.ConvTranspose2d(dim_level, dim_level // 2, 2, 2, 0),
                 nn.Conv2d(dim_level, dim_level // 2, 1, 1, bias=False),
-                DDA_Block(
-                    dim=dim_level // 2,
-                    num_blocks=num_blocks[level - 1 - i],
-                    dim_head=dim,
-                    heads=(dim_level // 2) // dim,
-                    gamma=gamma,
-                ),
+                DDA_Block(dim=dim_level // 2,
+                          num_blocks=num_blocks[level - 1 - i],
+                          dim_head=dim, heads=(dim_level // 2) // dim),
             ]))
             dim_level //= 2
 
@@ -308,14 +194,8 @@ class DDA_Denoiser(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def forward(self, x, illu_fea):
-        """
-        x:        [b, c, h, w]
-        illu_fea: [b, c, h, w]
-        Returns:  [b, c, h, w]
-        """
         fea = self.embedding(x)
-
-        fea_encoder  = []
+        fea_encoder   = []
         illu_fea_list = []
         for (dda, FeaDown, IlluDown) in self.encoder_layers:
             fea = dda(fea, illu_fea)
@@ -338,33 +218,18 @@ class DDA_Denoiser(nn.Module):
 # ── FD2RT_A2_Single_Stage ──────────────────────────────────────────────── #
 
 class FD2RT_A2_Single_Stage(nn.Module):
-    """One stage: W-IE (from A1) → DDA_Denoiser."""
-
-    def __init__(
-        self,
-        in_channels: int = 3,
-        out_channels: int = 3,
-        n_feat: int = 31,
-        level: int = 2,
-        num_blocks: list = None,
-        gamma: float = 2.66,
-    ) -> None:
+    def __init__(self, in_channels=3, out_channels=3, n_feat=31,
+                 level=2, num_blocks=None) -> None:
         if num_blocks is None:
             num_blocks = [1, 1, 1]
         super().__init__()
         self.estimator = WaveletIlluminationEstimator(n_feat)
-        self.denoiser  = DDA_Denoiser(
-            in_dim=in_channels,
-            out_dim=out_channels,
-            dim=n_feat,
-            level=level,
-            num_blocks=num_blocks,
-            gamma=gamma,
-        )
+        self.denoiser  = DDA_Denoiser(in_dim=in_channels, out_dim=out_channels,
+                                      dim=n_feat, level=level,
+                                      num_blocks=num_blocks)
 
     def forward(self, img):
-        """img: [b, 3, h, w]  →  [b, 3, h, w]"""
-        F_lu, I_lu, _N_map = self.estimator(img)   # N_map unused until Phase 2
+        F_lu, I_lu, _N_map = self.estimator(img)
         return self.denoiser(I_lu, F_lu)
 
 
@@ -372,9 +237,11 @@ class FD2RT_A2_Single_Stage(nn.Module):
 
 class FD2RT_A2(RetinexFormer):
     """
-    FD²RT Phase 2 model: W-IE + DDA_Block (spatial branch, GDFN FFN).
+    FD²RT A2: W-IE + DDA_Block (spatial branch, original FFN).
+    Checkpoint keys are identical to A1 (FD2RT_V1) — weights load without
+    any remapping.
 
-    Config entry point:
+    Config:
         network_g:
           type: FD2RT_A2
           in_channels: 3
@@ -384,149 +251,108 @@ class FD2RT_A2(RetinexFormer):
           num_blocks: [1, 2, 2]
     """
 
-    def __init__(
-        self,
-        in_channels: int = 3,
-        out_channels: int = 3,
-        n_feat: int = 31,
-        stage: int = 3,
-        num_blocks: list = None,
-        gamma: float = 2.66,
-    ) -> None:
+    def __init__(self, in_channels=3, out_channels=3, n_feat=31,
+                 stage=3, num_blocks=None) -> None:
         if num_blocks is None:
             num_blocks = [1, 1, 1]
         super().__init__(in_channels, out_channels, n_feat, stage, num_blocks)
         self.body = nn.Sequential(*[
             FD2RT_A2_Single_Stage(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                n_feat=n_feat,
-                level=2,
-                num_blocks=num_blocks,
-                gamma=gamma,
+                in_channels=in_channels, out_channels=out_channels,
+                n_feat=n_feat, level=2, num_blocks=num_blocks,
             )
             for _ in range(stage)
         ])
 
-    # forward() inherited from RetinexFormer: return self.body(x)
-
 
 # ── Verification ───────────────────────────────────────────────────────── #
 
-def _count(m):
-    return sum(p.numel() for p in m.parameters())
+CKPT_PATH = (
+    '/root/.claude/uploads/'
+    '65d5d802-aad9-4807-87d2-a69bf439e318/'
+    'e8684ae8-best_psnr_23.71_126000.pth'
+)
 
 
 def run_verification():
-    """
-    Verifies A2 against A1 on the same random input [4, 3, 128, 128].
-    Checks:
-      1. Output shapes match.
-      2. N_map is computed but not consumed.
-      3. Parameter counts are within [1.6M, 2.5M].
-    """
     from basicsr.models.archs.fd2rt_v1_arch import FD2RT_V1
 
-    SEED = 42
-    B, C, H, W = 4, 3, 128, 128
-    kwargs = dict(in_channels=3, out_channels=3, n_feat=40, stage=1,
-                  num_blocks=[1, 2, 2])
+    kwargs = dict(in_channels=3, out_channels=3, n_feat=40,
+                  stage=1, num_blocks=[1, 2, 2])
 
-    torch.manual_seed(SEED)
-    x = torch.randn(B, C, H, W)
-
-    # Build models
-    a1 = FD2RT_V1(**kwargs).eval()
-    a2 = FD2RT_A2(**kwargs).eval()
-
-    n_a1 = _count(a1)
-    n_a2 = _count(a2)
-
-    PASS = "PASS"
-    FAIL = "FAIL"
+    PASS = 'PASS'; FAIL = 'FAIL'
     all_ok = True
 
-    print("\n" + "=" * 60)
-    print("CHECK 1 — Output shape")
-    print("=" * 60)
-    torch.manual_seed(SEED)
+    # ── Check 1: Key-set identity ─────────────────────────────────────── #
+    print('\n' + '=' * 60)
+    print('CHECK 1 — State-dict keys match A1 checkpoint exactly')
+    print('=' * 60)
+
+    ckpt = torch.load(CKPT_PATH, map_location='cpu')
+    ckpt_keys = set(ckpt.get('params', ckpt).keys())
+
+    a2 = FD2RT_A2(**kwargs)
+    a2_keys = set(a2.state_dict().keys())
+
+    only_in_ckpt = ckpt_keys - a2_keys
+    only_in_a2   = a2_keys   - ckpt_keys
+    keys_ok = (len(only_in_ckpt) == 0 and len(only_in_a2) == 0)
+    all_ok &= keys_ok
+
+    print(f'  {PASS if keys_ok else FAIL}  '
+          f'Keys only in checkpoint : {len(only_in_ckpt)}')
+    print(f'  {PASS if keys_ok else FAIL}  '
+          f'Keys only in A2 model   : {len(only_in_a2)}')
+    if not keys_ok:
+        for k in sorted(only_in_ckpt)[:5]:
+            print(f'    CKPT only: {k}')
+        for k in sorted(only_in_a2)[:5]:
+            print(f'    A2 only : {k}')
+
+    # ── Check 2: Numerical equivalence ────────────────────────────────── #
+    print('\n' + '=' * 60)
+    print('CHECK 2 — Forward pass matches FD2RT_V1 (same weights, same input)')
+    print('=' * 60)
+
+    state = ckpt.get('params', ckpt)
+
+    a1 = FD2RT_V1(**kwargs).eval()
+    a1.load_state_dict(state)
+
+    a2.load_state_dict(state)
+    a2.eval()
+
+    torch.manual_seed(0)
+    x = torch.randn(1, 3, 128, 128)
     with torch.no_grad():
         out_a1 = a1(x)
-    torch.manual_seed(SEED)
-    with torch.no_grad():
         out_a2 = a2(x)
 
-    shape_ok = out_a1.shape == out_a2.shape == (B, C, H, W)
-    all_ok &= shape_ok
-    print(f"  {PASS if shape_ok else FAIL}  "
-          f"A1 out: {tuple(out_a1.shape)}   A2 out: {tuple(out_a2.shape)}")
+    max_diff = (out_a1 - out_a2).abs().max().item()
+    equiv_ok = max_diff < 1e-5
+    all_ok &= equiv_ok
+    print(f'  {PASS if equiv_ok else FAIL}  '
+          f'Max absolute diff A1 vs A2: {max_diff:.2e}  '
+          f'(threshold 1e-5)')
 
-    not_identical = not torch.allclose(out_a1, out_a2)
-    print(f"  {'PASS' if not_identical else 'NOTE'}  "
-          f"Outputs differ (expected — GDFN ≠ FeedForward)")
+    # ── Check 3: Parameter count ──────────────────────────────────────── #
+    print('\n' + '=' * 60)
+    print('CHECK 3 — Parameter count')
+    print('=' * 60)
+    n_a1 = sum(p.numel() for p in a1.parameters())
+    n_a2 = sum(p.numel() for p in a2.parameters())
+    same_count = (n_a1 == n_a2)
+    all_ok &= same_count
+    print(f'  {PASS if same_count else FAIL}  '
+          f'A1 params: {n_a1:,}  A2 params: {n_a2:,}  '
+          f'delta: {n_a2 - n_a1:+d}')
 
-    print("\n" + "=" * 60)
-    print("CHECK 2 — N_map computed but not consumed")
-    print("=" * 60)
-    stage_a2 = a2.body[0]
-    captured = {}
-
-    def _hook(m, inp, out):
-        captured['nmap'] = out[2]   # (F_lu, I_lu, N_map)[2]
-
-    h = stage_a2.estimator.register_forward_hook(_hook)
-    with torch.no_grad():
-        a2(x)
-    h.remove()
-
-    nmap_ok = (
-        'nmap' in captured
-        and captured['nmap'].shape == (B, 1, H, W)
-        and captured['nmap'].min().item() >= 0.0
-        and captured['nmap'].max().item() <= 1.0
-    )
-    all_ok &= nmap_ok
-    nmap = captured.get('nmap')
-    print(f"  {PASS if nmap_ok else FAIL}  "
-          f"N_map shape={tuple(nmap.shape) if nmap is not None else 'MISSING'}  "
-          f"range=[{nmap.min():.3f}, {nmap.max():.3f}]"
-          if nmap is not None else f"  {FAIL}  N_map not captured")
-
-    print("\n" + "=" * 60)
-    print("CHECK 3 — Parameter counts")
-    print("=" * 60)
-    limit = 2_500_000
-    a1_ok = n_a1 < limit
-    a2_ok = n_a2 < limit
-    a2_gt_a1 = n_a2 > n_a1   # A2 should have more params than A1
-    all_ok &= a1_ok and a2_ok
-
-    print(f"  {PASS if a1_ok else FAIL}  A1 (FD2RT_V1) : {n_a1:>9,} params")
-    print(f"  {PASS if a2_ok else FAIL}  A2 (FD2RT_A2) : {n_a2:>9,} params"
-          f"  (Δ = {n_a2 - n_a1:+,})")
-    print(f"  {'NOTE' if a2_gt_a1 else FAIL}  A2 > A1: {a2_gt_a1}  "
-          f"(expected — GDFN adds ~7K params)")
-    print(f"  {PASS if a2_ok else FAIL}  Under 2.5M limit: {a2_ok}")
-
-    # Per-module breakdown for DDA_Block components
-    stage = a2.body[0]
-    print("\n  DDA_Denoiser breakdown:")
-    total_dda = 0
-    for name, sub in stage.denoiser.named_modules():
-        if isinstance(sub, (DDA_Block, GDFN, DDA_MSA)):
-            n = _count(sub)
-            total_dda += n if not any(
-                isinstance(p, (DDA_Block, GDFN, DDA_MSA))
-                for p in sub.modules() if p is not sub
-            ) else 0
-            print(f"    {name:45s}  {type(sub).__name__:12s}  {n:>8,}")
-
-    print("\n" + "=" * 60)
+    print('\n' + '=' * 60)
     print(f"OVERALL: {'ALL CHECKS PASSED' if all_ok else 'SOME CHECKS FAILED'}")
-    print("=" * 60 + "\n")
+    print('=' * 60 + '\n')
     return all_ok
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     ok = run_verification()
-    sys.exit(0 if ok else 1)
+    import sys; sys.exit(0 if ok else 1)
