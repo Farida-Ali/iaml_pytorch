@@ -191,7 +191,8 @@ class ImageCleanModel(BaseModel):
         # l_pix.backward()
 
         if self.opt['train']['use_grad_clip']:
-            torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), 0.01)
+            torch.nn.utils.clip_grad_norm_(self.net_g.parameters(),
+                                           self.opt['train'].get('clip_grad_norm', 1.0))
         # self.optimizer_g.step()
         self.amp_scaler.step(self.optimizer_g)
         self.amp_scaler.update()

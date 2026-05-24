@@ -64,6 +64,7 @@ train:
   total_iter: 250000    # research plan: 250K (vs Retinexformer's 150K)
   warmup_iter: -1
   use_grad_clip: true
+  clip_grad_norm: 1.0
 
   # 2-cycle cosine schedule scaled to 250K total:
   #   Cycle 1: 77K iters — LR held near 3e-4  (warm-up plateau)
