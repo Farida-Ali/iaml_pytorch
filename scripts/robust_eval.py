@@ -132,19 +132,45 @@ def eval_checkpoint(ckpt_path, model, device, lq_paths, gt_paths):
             psnr_list, ssim_list)
 
 
+# ── Dataset roots for known presets ───────────────────────────────────── #
+_DATASET_ROOTS = {
+    'LOL_v1':        'data/LOLv1/Test',
+    'LOL_v2_real':   'data/LOL_v2_real/Test',
+    'LOL_v2_synth':  'data/LOL_v2_synthetic/Test',
+}
+
+
 # ── CLI ────────────────────────────────────────────────────────────────── #
 
 def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument('--arch',     required=True,
+    p = argparse.ArgumentParser(
+        description='Robust multi-checkpoint PSNR/SSIM evaluation.\n'
+                    'Accepts either (--arch + --ckpt_dir) OR (--config + --exp_dir).')
+
+    # Mode A: explicit arch + ckpt dir
+    p.add_argument('--arch',
                    choices=['FD2RT_V1', 'FD2RT_A2', 'FD2RT_A4', 'RetinexFormer'],
-                   help='Architecture name')
+                   help='Architecture name (Mode A)')
+    p.add_argument('--ckpt_dir',
+                   help='Directory containing net_g_*.pth files (Mode A)')
+
+    # Mode B: derive arch + paths from a training config
+    p.add_argument('--config',
+                   help='Path to training YAML config (Mode B). '
+                        'Arch and data paths are read from the config.')
+    p.add_argument('--exp_dir',
+                   help='Experiment root directory, e.g. '
+                        'experiments/train_FD2RT_A4_LOL_v1_fixed (Mode B). '
+                        'Checkpoints are loaded from <exp_dir>/models/.')
+
+    # Shared
     p.add_argument('--label',    default=None,
-                   help='Short label for output files (default: arch name)')
-    p.add_argument('--ckpt_dir', required=True,
-                   help='Directory containing net_g_*.pth files')
-    p.add_argument('--data_root', default='data/LOLv1/Test',
-                   help='Test data root with input/ and target/ subdirs')
+                   help='Short label for output files (default: arch name or config name)')
+    p.add_argument('--data_root', default=None,
+                   help='Test data root with input/ and target/ subdirs. '
+                        'Overrides --dataset and config data paths.')
+    p.add_argument('--dataset',  default=None, choices=list(_DATASET_ROOTS.keys()),
+                   help='Named dataset preset (overrides config val paths)')
     p.add_argument('--out_dir',   default='results/robust_eval')
     p.add_argument('--n_ckpts',   type=int, default=10,
                    help='Number of latest checkpoints to average (default 10)')
@@ -154,14 +180,65 @@ def parse_args():
     return p.parse_args()
 
 
+def _arch_from_config(config_path):
+    """Read arch type string from a basicsr YAML config."""
+    import yaml
+    with open(config_path) as f:
+        opt = yaml.safe_load(f)
+    return opt['network_g']['type']
+
+
+def _data_root_from_config(config_path):
+    """Read val data root from a basicsr YAML config."""
+    import yaml
+    with open(config_path) as f:
+        opt = yaml.safe_load(f)
+    gt_root = opt.get('datasets', {}).get('val', {}).get('dataroot_gt', '')
+    # Strip /target or /input suffix to get the Test root
+    for suffix in ['/target', '/input']:
+        if gt_root.endswith(suffix):
+            return gt_root[:-len(suffix)]
+    return os.path.dirname(gt_root)
+
+
 def main():
-    args  = parse_args()
-    label = args.label or args.arch
+    args = parse_args()
+
+    # Resolve mode
+    if args.config and args.exp_dir:
+        arch_name = _arch_from_config(args.config)
+        ckpt_dir  = os.path.join(args.exp_dir, 'models')
+        label     = args.label or os.path.basename(args.exp_dir)
+        if args.data_root:
+            data_root = args.data_root
+        elif args.dataset:
+            data_root = _DATASET_ROOTS[args.dataset]
+        else:
+            data_root = _data_root_from_config(args.config)
+        out_dir = args.out_dir or os.path.join(args.exp_dir, 'robust_eval')
+    elif args.arch and args.ckpt_dir:
+        arch_name = args.arch
+        ckpt_dir  = args.ckpt_dir
+        label     = args.label or args.arch
+        data_root = (args.data_root or
+                     (_DATASET_ROOTS[args.dataset] if args.dataset else 'data/LOLv1/Test'))
+        out_dir   = args.out_dir
+    else:
+        print('ERROR: provide either (--arch + --ckpt_dir) or (--config + --exp_dir).')
+        return 1
+
     device = torch.device('cpu' if (args.cpu or not torch.cuda.is_available()) else 'cuda')
     print(f'\nDevice  : {device}')
-    print(f'Arch    : {args.arch}')
+    print(f'Arch    : {arch_name}')
     print(f'Label   : {label}')
-    print(f'Ckpt dir: {args.ckpt_dir}')
+    print(f'Ckpt dir: {ckpt_dir}')
+    print(f'Data    : {data_root}')
+
+    # Patch args for rest of function
+    args.arch     = arch_name
+    args.ckpt_dir = ckpt_dir
+    args.out_dir  = out_dir
+    args.data_root = data_root
 
     # Discover checkpoints
     if args.best_only:
