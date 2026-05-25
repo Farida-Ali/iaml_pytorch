@@ -1,0 +1,121 @@
+# FD²RT A1 (V1) — LOL-v1 Training Config (FIXED: clip_grad_norm = 1.0)
+# W-IE only — no DDA, no frequency branch, original IGAB
+# Baseline to beat: Retinexformer 25.16 dB  |  Target: > 25.36 dB
+# Bug fixed: clip_grad_norm was 0.01 (hardcoded); now 1.0 from config.
+# -----------------------------------------------------------------------
+
+name: train_FD2RT_A1_LOL_v1_fixed
+model_type: ImageCleanModel
+scale: 1
+num_gpu: 1            # set to 0 for CPU debugging
+manual_seed: 100      # same seed as Retinexformer for fair comparison
+
+# ── Dataset ──────────────────────────────────────────────────────────── #
+datasets:
+  train:
+    name: TrainSet
+    type: Dataset_PairedImage
+    dataroot_gt: data/LOLv1/Train/target
+    dataroot_lq: data/LOLv1/Train/input
+    geometric_augs: true
+
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+    use_shuffle: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 8
+
+    ### Fixed 128×128 patch — same as Retinexformer LOL-v1 baseline
+    mini_batch_sizes: [8]
+    iters: [300000]       # must be >= total_iter; controls progressive schedule
+    gt_size: 128
+    gt_sizes: [128]
+
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    name: ValSet
+    type: Dataset_PairedImage
+    dataroot_gt: data/LOLv1/Test/target
+    dataroot_lq: data/LOLv1/Test/input
+    io_backend:
+      type: disk
+
+# ── Architecture ─────────────────────────────────────────────────────── #
+network_g:
+  type: FD2RT_V1       # registered via basicsr/models/archs/fd2rt_v1_arch.py
+  in_channels: 3
+  out_channels: 3
+  n_feat: 40           # identical to Retinexformer LOL-v1
+  stage: 1
+  num_blocks: [1, 2, 2]
+
+# ── Paths ─────────────────────────────────────────────────────────────── #
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+# ── Training ─────────────────────────────────────────────────────────── #
+train:
+  total_iter: 250000    # research plan: 250K (vs Retinexformer's 150K)
+  warmup_iter: -1
+  use_grad_clip: true
+  clip_grad_norm: 1.0   # FIXED: was hardcoded 0.01 in image_restoration_model.py
+
+  # 2-cycle cosine schedule scaled to 250K total:
+  #   Cycle 1: 77K iters — LR held near 3e-4  (warm-up plateau)
+  #   Cycle 2: 173K iters — cosine decay 3e-4 → 1e-6
+  scheduler:
+    type: CosineAnnealingRestartCyclicLR
+    periods: [77000, 173000]
+    restart_weights: [1, 1]
+    eta_mins: [0.0003, 0.000001]
+
+  mixing_augs:
+    mixup: true
+    mixup_beta: 1.2
+    use_identity: true   # 50% chance of no-op (identity) per batch
+
+  optim_g:
+    type: Adam
+    lr: !!float 2e-4
+    betas: [0.9, 0.999]
+
+  # Pixel loss (MAE) — identical to Retinexformer
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1
+    reduction: mean
+
+# ── Validation ───────────────────────────────────────────────────────── #
+val:
+  window_size: 4
+  val_freq: !!float 1e3
+  save_img: false
+  rgb2bgr: true
+  use_image: false
+  max_minibatch: 8
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+
+# ── Logging ──────────────────────────────────────────────────────────── #
+logger:
+  print_freq: 500
+  save_checkpoint_freq: !!float 5e3   # save every 5K iters
+  use_tb_logger: true
+  wandb:
+    project: fd2rt-a1-fixed
+    resume_id: ~
+
+# ── Distributed ──────────────────────────────────────────────────────── #
+dist_params:
+  backend: nccl
+  port: 29500
