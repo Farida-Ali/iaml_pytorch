@@ -244,7 +244,7 @@ def main():
     fig.subplots_adjust(left=0, right=1, top=1, bottom=0, hspace=0, wspace=0)
 
     # -----------------------------------------------------------------------
-    # Save PNG and PDF
+    # Save combined contact sheet (PNG + PDF)
     # -----------------------------------------------------------------------
     safe_name = args.dataset_name.replace(" ", "_")
     png_path = os.path.join(args.out_dir, f"candidate_sheet_{safe_name}.png")
@@ -256,6 +256,66 @@ def main():
     print(f"[Saved] PDF -> '{pdf_path}'")
 
     plt.close(fig)
+
+    # -----------------------------------------------------------------------
+    # Save each candidate as a separate single-row figure (PNG + PDF)
+    # Layout: column header bar + row metric bar + 4 images
+    # -----------------------------------------------------------------------
+    print("\n[Per-image figures]")
+    for ri, row_data in enumerate(rows_data):
+        fname_stem = os.path.splitext(row_data["filename"])[0]
+        safe_ds = args.dataset_name.replace(" ", "_")
+
+        img_h_in = row_data["img_h"] / DPI
+        single_gs_heights = [col_header_h_in, row_header_h_in, img_h_in]
+        single_total_h = sum(single_gs_heights) + 0.05
+
+        fig_s = plt.figure(figsize=(fig_w_in, single_total_h), dpi=DPI)
+        gs_s = GridSpec(
+            3, N_COLS,
+            figure=fig_s,
+            height_ratios=single_gs_heights,
+            hspace=0.0,
+            wspace=0.0,
+        )
+
+        # Column headers
+        for ci, label in enumerate(COL_LABELS):
+            ax_h = fig_s.add_subplot(gs_s[0, ci])
+            ax_h.set_facecolor(HEADER_BG)
+            ax_h.set_axis_off()
+            ax_h.patch.set_visible(True)
+            ax_h.text(0.5, 0.5, label, ha="center", va="center",
+                      fontsize=font_size, fontweight="bold", color=HEADER_FG,
+                      transform=ax_h.transAxes)
+
+        # Row metric bar
+        ax_rh = fig_s.add_subplot(gs_s[1, :])
+        ax_rh.set_facecolor(HEADER_BG)
+        ax_rh.set_axis_off()
+        ax_rh.patch.set_visible(True)
+        ax_rh.text(0.5, 0.5, row_data["label"], ha="center", va="center",
+                   fontsize=max(MIN_FONT_PT - 1, font_size - 1),
+                   fontweight="bold", color=HEADER_FG,
+                   transform=ax_rh.transAxes)
+
+        # Four images
+        for ci, img in enumerate(row_data["images"]):
+            ax_i = fig_s.add_subplot(gs_s[2, ci])
+            ax_i.imshow(img, aspect="auto", interpolation="lanczos")
+            ax_i.axis("off")
+
+        fig_s.subplots_adjust(left=0, right=1, top=1, bottom=0, hspace=0, wspace=0)
+
+        for fmt in ("png", "pdf"):
+            out_path = os.path.join(
+                args.out_dir,
+                f"candidate_{safe_ds}_{fname_stem}.{fmt}",
+            )
+            fig_s.savefig(out_path, dpi=DPI, bbox_inches="tight", format=fmt)
+            print(f"[Saved] {fmt.upper()} -> '{out_path}'")
+
+        plt.close(fig_s)
 
 
 if __name__ == "__main__":
