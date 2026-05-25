@@ -175,8 +175,8 @@ def main():
     # Estimate per-image heights in inches
     img_heights_in = [r["img_h"] / DPI for r in rows_data]
 
-    col_header_h_in = 0.25          # bar for column labels at very top
-    row_header_h_in = 0.20          # bar above each image row
+    col_header_h_in = 0.45          # bar for column labels at very top
+    row_header_h_in = 0.35          # bar above each image row
 
     gs_heights = [col_header_h_in]
     for h in img_heights_in:
@@ -198,21 +198,20 @@ def main():
     font_size = max(MIN_FONT_PT, fig_w_in * 1.3)
 
     # -----------------------------------------------------------------------
-    # Column header bar (row 0 of GridSpec)
+    # Column header bar (row 0 of GridSpec) — one axis per column
     # -----------------------------------------------------------------------
-    ax_col_header = fig.add_subplot(gs[0, :])
-    ax_col_header.set_facecolor(HEADER_BG)
-    ax_col_header.set_xlim(0, N_COLS)
-    ax_col_header.set_ylim(0, 1)
-    ax_col_header.axis("off")
     for ci, label in enumerate(COL_LABELS):
+        ax_col_header = fig.add_subplot(gs[0, ci])
+        ax_col_header.set_facecolor(HEADER_BG)
+        ax_col_header.set_axis_off()
+        ax_col_header.patch.set_visible(True)
         ax_col_header.text(
-            ci + 0.5, 0.5, label,
+            0.5, 0.5, label,
             ha="center", va="center",
             fontsize=font_size,
             fontweight="bold",
             color=HEADER_FG,
-            transform=ax_col_header.transData,
+            transform=ax_col_header.transAxes,
         )
 
     # -----------------------------------------------------------------------
@@ -225,7 +224,8 @@ def main():
         # -- Row header bar --------------------------------------------------
         ax_row_header = fig.add_subplot(gs[gs_row_header, :])
         ax_row_header.set_facecolor(HEADER_BG)
-        ax_row_header.axis("off")
+        ax_row_header.set_axis_off()
+        ax_row_header.patch.set_visible(True)
         ax_row_header.text(
             0.5, 0.5, row_data["label"],
             ha="center", va="center",
@@ -241,7 +241,7 @@ def main():
             ax.imshow(img, aspect="auto", interpolation="lanczos")
             ax.axis("off")
 
-    plt.tight_layout(pad=0.0, h_pad=0.0, w_pad=0.0)
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0, hspace=0, wspace=0)
 
     # -----------------------------------------------------------------------
     # Save PNG and PDF

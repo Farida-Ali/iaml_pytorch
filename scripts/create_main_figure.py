@@ -311,8 +311,8 @@ def build_figure(dataset_rows: list, fig_width_in: float) -> plt.Figure:
         row_img_heights.append(row_h_in)
 
     # Caption height below each image row, and column-header height
-    caption_h_in = col_w_in * 0.12
-    col_header_h_in = col_w_in * 0.10
+    caption_h_in = 0.22            # fixed inches, enough for metric text
+    col_header_h_in = 0.35         # fixed inches — visible at both 1-col and 2-col
 
     # Total figure height
     total_h_in = col_header_h_in + n_rows * (max(row_img_heights) + caption_h_in)
@@ -330,12 +330,13 @@ def build_figure(dataset_rows: list, fig_width_in: float) -> plt.Figure:
         gs_n_rows, N_COLS,
         figure=fig,
         height_ratios=gs_heights,
-        hspace=0.02,
+        hspace=0.03,
         wspace=0.01,
-        left=0.08, right=0.99, top=0.99, bottom=0.01,
+        left=0.08, right=0.99, top=0.98, bottom=0.01,
     )
 
-    font_size = max(5.0, fig_width_in * 1.5)
+    # Fixed sizes so headers are legible at both 1-col (3.5") and 2-col (7")
+    font_size = 9.0 if fig_width_in <= 4.0 else 11.0
 
     # ------------------------------------------------------------------
     # Column headers row (gs row 0)
@@ -343,6 +344,8 @@ def build_figure(dataset_rows: list, fig_width_in: float) -> plt.Figure:
     for ci, label in enumerate(COL_LABELS):
         ax = fig.add_subplot(gs[0, ci])
         ax.set_facecolor("#333333")
+        ax.set_axis_off()
+        ax.patch.set_visible(True)
         ax.text(
             0.5, 0.5, label,
             ha="center", va="center",
@@ -351,7 +354,6 @@ def build_figure(dataset_rows: list, fig_width_in: float) -> plt.Figure:
             color="white",
             transform=ax.transAxes,
         )
-        ax.axis("off")
 
     # ------------------------------------------------------------------
     # Dataset rows
