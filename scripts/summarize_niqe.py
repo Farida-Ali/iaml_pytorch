@@ -56,19 +56,24 @@ def parse_args():
     return p.parse_args()
 
 
+def _safe_float(row, key):
+    try:
+        return float(row[key])
+    except (ValueError, KeyError, TypeError):
+        return float('nan')
+
+
 def load_csv(path: str) -> list:
     rows = []
     with open(path, newline='') as f:
         for row in csv.DictReader(f):
-            try:
-                score = float(row['niqe_score'])
-            except (ValueError, KeyError):
-                score = float('nan')
             rows.append({
-                'dataset':    row.get('dataset', ''),
-                'model':      row.get('model', ''),
-                'filename':   row.get('filename', ''),
-                'niqe_score': score,
+                'dataset':      row.get('dataset', ''),
+                'model':        row.get('model', ''),
+                'filename':     row.get('filename', ''),
+                'niqe_score':   _safe_float(row, 'niqe_score'),
+                'brisque_score': _safe_float(row, 'brisque_score'),
+                'piqe_score':   _safe_float(row, 'piqe_score'),
             })
     return rows
 
@@ -106,18 +111,26 @@ def main():
     # Save aggregated CSV
     os.makedirs(args.out_dir, exist_ok=True)
     all_csv_path = os.path.join(args.out_dir, 'niqe_all.csv')
+    fieldnames = ['dataset', 'model', 'filename', 'niqe_score', 'brisque_score', 'piqe_score']
     with open(all_csv_path, 'w', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=['dataset', 'model', 'filename', 'niqe_score'])
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
         w.writeheader()
         w.writerows(all_rows)
     print(f'\n[Saved] Aggregated CSV → {all_csv_path}')
 
-    # Group by (dataset, model)
-    groups = defaultdict(list)
+    # Group by (dataset, model) — separate lists per metric
+    groups_niqe    = defaultdict(list)
+    groups_brisque = defaultdict(list)
+    groups_piqe    = defaultdict(list)
     for row in all_rows:
         key = (row['dataset'], row['model'])
         if not np.isnan(row['niqe_score']):
-            groups[key].append(row['niqe_score'])
+            groups_niqe[key].append(row['niqe_score'])
+        if not np.isnan(row.get('brisque_score', float('nan'))):
+            groups_brisque[key].append(row['brisque_score'])
+        if not np.isnan(row.get('piqe_score', float('nan'))):
+            groups_piqe[key].append(row['piqe_score'])
+    groups = groups_niqe  # keep for baseline detection
 
     datasets = sorted({k[0] for k in groups})
     models   = sorted({k[1] for k in groups})
@@ -133,23 +146,32 @@ def main():
             baseline = models[0]
     print(f'\n[Baseline model for delta computation] {baseline}')
 
+    def mean_std_str(score_list):
+        if score_list:
+            return float(np.mean(score_list)), float(np.std(score_list)), len(score_list)
+        return float('nan'), float('nan'), 0
+
     # Build summary table data
-    # Columns: Dataset | Model | NIQE Mean ± Std | N | Δ vs baseline
     table_rows = []
     for ds in datasets:
         for mdl in models:
-            scores = groups.get((ds, mdl), [])
-            if not scores:
-                continue
-            mean_s = float(np.mean(scores))
-            std_s  = float(np.std(scores))
-            n      = len(scores)
+            niqe_list    = groups_niqe.get((ds, mdl), [])
+            brisque_list = groups_brisque.get((ds, mdl), [])
+            piqe_list    = groups_piqe.get((ds, mdl), [])
 
-            # Delta vs baseline for same dataset
-            base_scores = groups.get((ds, baseline), [])
-            if base_scores and mdl != baseline:
+            if not niqe_list and not brisque_list and not piqe_list:
+                continue
+
+            n = max(len(niqe_list), len(brisque_list), len(piqe_list))
+            mean_niqe, std_niqe, _       = mean_std_str(niqe_list)
+            mean_brisque, std_brisque, _ = mean_std_str(brisque_list)
+            mean_piqe, std_piqe, _       = mean_std_str(piqe_list)
+
+            # Delta vs baseline (NIQE only)
+            base_scores = groups_niqe.get((ds, baseline), [])
+            if base_scores and mdl != baseline and niqe_list:
                 base_mean = float(np.mean(base_scores))
-                delta = mean_s - base_mean
+                delta = mean_niqe - base_mean
                 delta_str = f'{delta:+.4f}'
                 better = '↓ better' if delta < 0 else ('↑ worse' if delta > 0 else '—')
                 delta_cell = f'{delta_str} ({better})'
@@ -159,21 +181,33 @@ def main():
                 delta_cell = 'N/A'
 
             table_rows.append({
-                'dataset':   ds,
-                'model':     mdl,
-                'mean':      mean_s,
-                'std':       std_s,
-                'n':         n,
-                'delta':     delta_cell,
+                'dataset':      ds,
+                'model':        mdl,
+                'mean':         mean_niqe,
+                'std':          std_niqe,
+                'mean_brisque': mean_brisque,
+                'std_brisque':  std_brisque,
+                'mean_piqe':    mean_piqe,
+                'std_piqe':     std_piqe,
+                'n':            n,
+                'delta':        delta_cell,
             })
 
+    def fmt_metric(m, s):
+        if np.isnan(m):
+            return f'{"n/a":>12}  {"":>8}'
+        return f'{m:>12.4f}  {s:>8.4f}'
+
     # Print table to stdout
-    print(f'\n{"Dataset":12s}  {"Model":22s}  {"NIQE Mean":>12}  {"± Std":>8}  '
+    print(f'\n{"Dataset":12s}  {"Model":22s}  {"NIQE Mean":>12}  {"±Std":>8}  '
+          f'{"BRISQUE":>12}  {"±Std":>8}  {"PIQE":>12}  {"±Std":>8}  '
           f'{"N":>5}  {"Δ vs " + baseline}')
-    print('─' * 90)
+    print('─' * 130)
     for r in table_rows:
         print(f'{r["dataset"]:12s}  {r["model"]:22s}  '
-              f'{r["mean"]:>12.4f}  {r["std"]:>8.4f}  '
+              f'{fmt_metric(r["mean"], r["std"])}  '
+              f'{fmt_metric(r["mean_brisque"], r["std_brisque"])}  '
+              f'{fmt_metric(r["mean_piqe"], r["std_piqe"])}  '
               f'{r["n"]:>5d}  {r["delta"]}')
 
     # Build markdown
@@ -184,31 +218,41 @@ def main():
     md_lines.append('\n> **Lower NIQE = better perceptual quality** (no reference image needed)')
     md_lines.append(f'\nBaseline for Δ computation: **{baseline}**')
 
+    def md_metric(m, s):
+        return f'{m:.4f} ± {s:.4f}' if not np.isnan(m) else 'n/a'
+
     # One table per dataset
     for ds in datasets:
         ds_rows = [r for r in table_rows if r['dataset'] == ds]
         if not ds_rows:
             continue
         md_lines.append(f'\n## Dataset: {ds}\n')
-        md_lines.append(f'| Model | NIQE Mean | ± Std | N images | Δ vs {baseline} |')
-        md_lines.append('|-------|-----------|-------|----------|---------|')
+        md_lines.append(f'| Model | NIQE Mean ± Std | BRISQUE Mean ± Std | PIQE Mean ± Std | N images | Δ NIQE vs {baseline} |')
+        md_lines.append('|-------|-----------------|--------------------|-----------------|---------:|------|')
         for r in ds_rows:
             md_lines.append(
-                f'| {r["model"]} | {r["mean"]:.4f} | {r["std"]:.4f} '
+                f'| {r["model"]} '
+                f'| {md_metric(r["mean"], r["std"])} '
+                f'| {md_metric(r["mean_brisque"], r["std_brisque"])} '
+                f'| {md_metric(r["mean_piqe"], r["std_piqe"])} '
                 f'| {r["n"]} | {r["delta"]} |')
 
     # Overall summary table (all datasets combined)
     md_lines.append('\n## Overall Summary (all datasets combined)\n')
-    md_lines.append(f'| Dataset | Model | NIQE Mean ± Std | N images | Δ vs {baseline} |')
-    md_lines.append('|---------|-------|-----------------|----------|---------|')
+    md_lines.append(f'| Dataset | Model | NIQE Mean ± Std | BRISQUE Mean ± Std | PIQE Mean ± Std | N images | Δ NIQE vs {baseline} |')
+    md_lines.append('|---------|-------|-----------------|--------------------|-----------------|---------:|------|')
     for r in table_rows:
         md_lines.append(
-            f'| {r["dataset"]} | {r["model"]} | '
-            f'{r["mean"]:.4f} ± {r["std"]:.4f} | {r["n"]} | {r["delta"]} |')
+            f'| {r["dataset"]} | {r["model"]} '
+            f'| {md_metric(r["mean"], r["std"])} '
+            f'| {md_metric(r["mean_brisque"], r["std_brisque"])} '
+            f'| {md_metric(r["mean_piqe"], r["std_piqe"])} '
+            f'| {r["n"]} | {r["delta"]} |')
 
     md_lines.append('\n---')
-    md_lines.append(f'\n*Note: NIQE scores computed on Y-channel (YCbCr) of enhanced images.*  ')
-    md_lines.append('*Protocol: convert RGB → BGR → Y channel, crop_border=0, block_size=96×96.*')
+    md_lines.append(f'\n*Note: All scores are no-reference (lower = better perceptual quality).*  ')
+    md_lines.append('*NIQE: Y-channel (YCbCr), crop_border=0, block_size=96×96 (basicsr implementation).*  ')
+    md_lines.append('*BRISQUE / PIQE: piq library (pip install piq). Shown as n/a if not installed.*')
 
     md_text = '\n'.join(md_lines) + '\n'
 

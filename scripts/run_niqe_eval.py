@@ -1,11 +1,17 @@
 """
 scripts/run_niqe_eval.py
 ────────────────────────
-Inference + NIQE evaluation on no-reference (no-GT) low-light datasets.
+Inference + NIQE / BRISQUE / PIQE evaluation on no-reference (no-GT)
+low-light datasets.
 
 Loads a trained model, enhances every image in --input_dir, saves the
-enhanced PNGs to --output_dir, and computes the NIQE score for each one
-using the NIQE implementation already present in basicsr/metrics/niqe.py.
+enhanced PNGs to --output_dir, and computes three no-reference metrics:
+
+  NIQE   — built into basicsr/metrics/niqe.py (always available)
+  BRISQUE — tries piq library, then cv2.quality (opencv-contrib)
+  PIQE   — tries piq library
+
+All three: lower score = better perceptual quality.
 
 IMPORTANT: Run from the repository root, e.g.:
     cd /workspace/fd2rt/Retinexformer
@@ -13,6 +19,10 @@ IMPORTANT: Run from the repository root, e.g.:
 
 This is required because basicsr/metrics/niqe.py loads its pristine-dataset
 params from the relative path 'basicsr/metrics/niqe_pris_params.npz'.
+
+If BRISQUE / PIQE show "nan" the piq library is not installed.
+Install it with:  pip install piq
+(opencv-contrib also works for BRISQUE: pip install opencv-contrib-python)
 
 Usage examples
 ──────────────
@@ -38,7 +48,8 @@ Output
 ──────
   <output_dir>/
       <filename>.png   — enhanced image (lossless)
-      niqe_results.csv — columns: dataset, model, filename, niqe_score
+      niqe_results.csv — columns: dataset, model, filename,
+                                  niqe_score, brisque_score, piqe_score
 """
 
 import sys
@@ -160,6 +171,103 @@ def compute_niqe(img_rgb_f32: np.ndarray) -> float:
     return score
 
 
+def compute_brisque(img_rgb_f32: np.ndarray) -> float:
+    """
+    Compute BRISQUE score on a float32 [0,1] RGB image (lower = better).
+
+    Backend priority:
+      1. piq.brisque()          — pip install piq
+      2. cv2.quality.QualityBRISQUE_compute()  — pip install opencv-contrib-python
+         (requires brisque_model_live.yml and brisque_range_live.yml on PATH)
+      3. Returns nan with a one-time warning if neither is available.
+
+    Input convention for piq: float32 tensor [0,1], RGB, shape (1,3,H,W).
+    Input convention for cv2.quality: uint8 BGR, shape (H,W,3).
+    """
+    # --- backend 1: piq ---
+    try:
+        import piq
+        t = torch.from_numpy(img_rgb_f32).permute(2, 0, 1).unsqueeze(0)
+        return float(piq.brisque(t, data_range=1.0, reduction='none')[0])
+    except ImportError:
+        pass
+    except Exception as exc:
+        print(f'  [BRISQUE/piq] Failed: {exc}')
+        return float('nan')
+
+    # --- backend 2: cv2.quality (opencv-contrib) ---
+    try:
+        import cv2.quality as cvq  # noqa
+        # cv2.quality needs the LIVE model files; look in common locations
+        model_candidates = [
+            'brisque_model_live.yml',
+            '/usr/share/opencv4/quality/brisque_model_live.yml',
+        ]
+        range_candidates = [
+            'brisque_range_live.yml',
+            '/usr/share/opencv4/quality/brisque_range_live.yml',
+        ]
+        model_path = next((p for p in model_candidates if os.path.isfile(p)), None)
+        range_path = next((p for p in range_candidates if os.path.isfile(p)), None)
+        if model_path and range_path:
+            img_bgr_u8 = cv2.cvtColor(
+                (img_rgb_f32 * 255.0).clip(0, 255).astype(np.uint8),
+                cv2.COLOR_RGB2BGR)
+            qs = cvq.QualityBRISQUE_create(model_path, range_path)
+            return float(qs.compute(img_bgr_u8)[0])
+        else:
+            # Model files not found — fall through to nan
+            pass
+    except (ImportError, AttributeError):
+        pass
+    except Exception as exc:
+        print(f'  [BRISQUE/cv2] Failed: {exc}')
+        return float('nan')
+
+    return float('nan')
+
+
+def compute_piqe(img_rgb_f32: np.ndarray) -> float:
+    """
+    Compute PIQE score on a float32 [0,1] RGB image (lower = better).
+
+    Uses piq.piqe() — pip install piq.
+    Returns nan if piq is not installed.
+
+    Input convention: float32 tensor [0,1], RGB, shape (1,3,H,W).
+    """
+    try:
+        import piq
+        t = torch.from_numpy(img_rgb_f32).permute(2, 0, 1).unsqueeze(0)
+        return float(piq.piqe(t, data_range=1.0, reduction='none')[0])
+    except ImportError:
+        pass
+    except Exception as exc:
+        print(f'  [PIQE/piq] Failed: {exc}')
+    return float('nan')
+
+
+# ── One-time availability check ───────────────────────────────────────── #
+
+def check_metric_backends():
+    """Print which optional backends are available at startup."""
+    try:
+        import piq
+        print(f'  BRISQUE/PIQE : piq {piq.__version__} ✓')
+        return
+    except ImportError:
+        pass
+    try:
+        import cv2.quality  # noqa
+        print('  BRISQUE      : cv2.quality (opencv-contrib) ✓')
+        print('  PIQE         : not available (install piq)')
+        return
+    except (ImportError, AttributeError):
+        pass
+    print('  BRISQUE/PIQE : NOT AVAILABLE — scores will be nan')
+    print('                 Install with: pip install piq')
+
+
 # ── CLI ───────────────────────────────────────────────────────────────── #
 
 def parse_args():
@@ -230,13 +338,18 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     print(f'  Parameters  : {n_params:,}')
 
-    # Run inference + NIQE
-    print(f'\n[Inference + NIQE]')
-    print(f'{"Filename":40s}  {"NIQE":>8}  {"Time ms":>8}')
-    print('─' * 62)
+    print('\n[Metric backends]')
+    check_metric_backends()
+
+    # Run inference + metrics
+    print(f'\n[Inference + NIQE / BRISQUE / PIQE]')
+    print(f'{"Filename":40s}  {"NIQE":>8}  {"BRISQUE":>8}  {"PIQE":>8}  {"Time ms":>8}')
+    print('─' * 82)
 
     csv_rows = []
-    niqe_scores = []
+    niqe_scores    = []
+    brisque_scores = []
+    piqe_scores    = []
 
     for img_path in img_paths:
         fname = os.path.basename(img_path)
@@ -256,34 +369,52 @@ def main():
         out_uint8 = (out_f32 * 255.0).clip(0, 255).astype(np.uint8)
         Image.fromarray(out_uint8, mode='RGB').save(save_path)
 
-        # NIQE
-        niqe_score = compute_niqe(out_f32)
+        # Metrics
+        niqe_score    = compute_niqe(out_f32)
+        brisque_score = compute_brisque(out_f32)
+        piqe_score    = compute_piqe(out_f32)
+
         if not np.isnan(niqe_score):
             niqe_scores.append(niqe_score)
+        if not np.isnan(brisque_score):
+            brisque_scores.append(brisque_score)
+        if not np.isnan(piqe_score):
+            piqe_scores.append(piqe_score)
 
-        print(f'{fname:40s}  {niqe_score:>8.4f}  {elapsed_ms:>8.1f}')
+        def fmt(v):
+            return f'{v:8.4f}' if not np.isnan(v) else '     nan'
+
+        print(f'{fname:40s}  {fmt(niqe_score)}  {fmt(brisque_score)}  {fmt(piqe_score)}  {elapsed_ms:>8.1f}')
         csv_rows.append({
-            'dataset':    args.dataset_name,
-            'model':      args.model_name,
-            'filename':   fname,
-            'niqe_score': f'{niqe_score:.6f}' if not np.isnan(niqe_score) else 'nan',
+            'dataset':      args.dataset_name,
+            'model':        args.model_name,
+            'filename':     fname,
+            'niqe_score':   f'{niqe_score:.6f}'    if not np.isnan(niqe_score)    else 'nan',
+            'brisque_score': f'{brisque_score:.6f}' if not np.isnan(brisque_score) else 'nan',
+            'piqe_score':   f'{piqe_score:.6f}'    if not np.isnan(piqe_score)    else 'nan',
         })
 
     # Summary stats
-    print('─' * 62)
-    if niqe_scores:
-        mean_niqe = float(np.mean(niqe_scores))
-        std_niqe  = float(np.std(niqe_scores))
-        print(f'\n  NIQE mean ± std : {mean_niqe:.4f} ± {std_niqe:.4f}  '
-              f'(N={len(niqe_scores)}, lower is better)')
-    else:
-        mean_niqe, std_niqe = float('nan'), float('nan')
-        print('\n  No valid NIQE scores computed.')
+    print('─' * 82)
+
+    def summarise(label, scores):
+        if scores:
+            m, s = float(np.mean(scores)), float(np.std(scores))
+            print(f'  {label:<12} mean ± std : {m:.4f} ± {s:.4f}  (N={len(scores)}, lower is better)')
+            return m, s
+        print(f'  {label:<12} : no valid scores (metric not available or all nan).')
+        return float('nan'), float('nan')
+
+    print()
+    summarise('NIQE',    niqe_scores)
+    summarise('BRISQUE', brisque_scores)
+    summarise('PIQE',    piqe_scores)
 
     # Save CSV
     csv_path = os.path.join(args.output_dir, 'niqe_results.csv')
+    fieldnames = ['dataset', 'model', 'filename', 'niqe_score', 'brisque_score', 'piqe_score']
     with open(csv_path, 'w', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=['dataset', 'model', 'filename', 'niqe_score'])
+        w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         w.writerows(csv_rows)
     print(f'\n[Saved] {csv_path}')
