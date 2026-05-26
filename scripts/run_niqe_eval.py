@@ -176,13 +176,11 @@ def compute_brisque(img_rgb_f32: np.ndarray) -> float:
     Compute BRISQUE score on a float32 [0,1] RGB image (lower = better).
 
     Backend priority:
-      1. piq.brisque()          — pip install piq
-      2. cv2.quality.QualityBRISQUE_compute()  — pip install opencv-contrib-python
-         (requires brisque_model_live.yml and brisque_range_live.yml on PATH)
-      3. Returns nan with a one-time warning if neither is available.
-
-    Input convention for piq: float32 tensor [0,1], RGB, shape (1,3,H,W).
-    Input convention for cv2.quality: uint8 BGR, shape (H,W,3).
+      1. piq.brisque()                      — pip install piq
+      2. cv2.quality.QualityBRISQUE_create  — pip install opencv-contrib-python
+      3. brisque Python package             — pip install brisque
+         (pure Python, bundles the LIVE SVR model; needs scikit-learn)
+      4. Returns nan if none is available.
     """
     # --- backend 1: piq ---
     try:
@@ -198,7 +196,6 @@ def compute_brisque(img_rgb_f32: np.ndarray) -> float:
     # --- backend 2: cv2.quality (opencv-contrib) ---
     try:
         import cv2.quality as cvq  # noqa
-        # cv2.quality needs the LIVE model files; look in common locations
         model_candidates = [
             'brisque_model_live.yml',
             '/usr/share/opencv4/quality/brisque_model_live.yml',
@@ -215,26 +212,99 @@ def compute_brisque(img_rgb_f32: np.ndarray) -> float:
                 cv2.COLOR_RGB2BGR)
             qs = cvq.QualityBRISQUE_create(model_path, range_path)
             return float(qs.compute(img_bgr_u8)[0])
-        else:
-            # Model files not found — fall through to nan
-            pass
     except (ImportError, AttributeError):
         pass
     except Exception as exc:
         print(f'  [BRISQUE/cv2] Failed: {exc}')
         return float('nan')
 
+    # --- backend 3: brisque pure-Python package (pip install brisque) ---
+    try:
+        from brisque import BRISQUE as _BRISQUE
+        from PIL import Image as _PILImg
+        pil = _PILImg.fromarray(
+            (img_rgb_f32 * 255.0).clip(0, 255).astype(np.uint8), 'RGB')
+        try:
+            return float(_BRISQUE(url=False).score(pil))
+        except TypeError:
+            return float(_BRISQUE().score(pil))
+    except ImportError:
+        pass
+    except Exception as exc:
+        print(f'  [BRISQUE/brisque-pkg] Failed: {exc}')
+
     return float('nan')
+
+
+# ── PIQE — pure numpy/scipy implementation ────────────────────────────── #
+
+def _piqe_numpy(img_rgb_f32: np.ndarray) -> float:
+    """
+    PIQE (Perception-based Image Quality Evaluator) — numpy/scipy only.
+
+    Algorithm: Venkatanath et al., NCC 2015 (simplified block-level version).
+    Divides the image into 16×16 blocks; for each "active" block (local std > 8
+    out of 255) computes a distortion score based on how much the block's
+    normalized-coefficient kurtosis deviates from the Gaussian value of 3,
+    weighted by the block's coefficient of variation.
+
+    Returns a score ≥ 0 where lower = better quality. Scores are consistent
+    across models on the same dataset; absolute calibration may differ from
+    the MATLAB PIQE reference.
+    """
+    # Rec.601 luminance, float64 [0, 255]
+    gray = (0.299  * img_rgb_f32[:, :, 0]
+          + 0.587  * img_rgb_f32[:, :, 1]
+          + 0.114  * img_rgb_f32[:, :, 2]) * 255.0
+
+    N = 16    # block side length
+    C = 1.0   # regularisation constant
+    h, w = gray.shape
+
+    # Pad to multiples of N
+    hp = int(np.ceil(h / N)) * N
+    wp = int(np.ceil(w / N)) * N
+    g = np.pad(gray, ((0, hp - h), (0, wp - w)), mode='reflect')
+
+    # Reshape to (nb_h, nb_w, N, N)
+    nb_h = hp // N
+    nb_w = wp // N
+    blocks = g.reshape(nb_h, N, nb_w, N).transpose(0, 2, 1, 3)
+
+    b_mean = blocks.mean(axis=(2, 3))   # (nb_h, nb_w)
+    b_var  = blocks.var(axis=(2, 3))    # (nb_h, nb_w)
+
+    # Active blocks: local std > 8 DN  →  variance > 64
+    idx_h, idx_w = np.where(b_var > 64.0)
+    if len(idx_h) == 0:
+        return float('nan')
+
+    scores = []
+    for i, j in zip(idx_h, idx_w):
+        mu  = b_mean[i, j]
+        var = b_var[i, j]
+        sig = np.sqrt(var)
+
+        # Normalize block coefficients
+        flat = ((blocks[i, j] - mu) / (sig + C)).ravel()
+
+        # Raw kurtosis (Gaussian = 3)
+        kurt = float(np.mean(flat ** 4))
+
+        # Block distortion: kurtosis-deviation × coefficient of variation
+        D = (kurt - 3.0) ** 2 * var / (mu + C) ** 2
+        scores.append(D)
+
+    return float(np.mean(scores))
 
 
 def compute_piqe(img_rgb_f32: np.ndarray) -> float:
     """
     Compute PIQE score on a float32 [0,1] RGB image (lower = better).
 
-    Uses piq.piqe() — pip install piq.
-    Returns nan if piq is not installed.
-
-    Input convention: float32 tensor [0,1], RGB, shape (1,3,H,W).
+    Backend priority:
+      1. piq.piqe()     — pip install piq
+      2. _piqe_numpy()  — pure numpy/scipy fallback (always available)
     """
     try:
         import piq
@@ -244,6 +314,12 @@ def compute_piqe(img_rgb_f32: np.ndarray) -> float:
         pass
     except Exception as exc:
         print(f'  [PIQE/piq] Failed: {exc}')
+
+    # Always-available fallback
+    try:
+        return _piqe_numpy(img_rgb_f32)
+    except Exception as exc:
+        print(f'  [PIQE/numpy] Failed: {exc}')
     return float('nan')
 
 
@@ -251,21 +327,28 @@ def compute_piqe(img_rgb_f32: np.ndarray) -> float:
 
 def check_metric_backends():
     """Print which optional backends are available at startup."""
+    # PIQE: numpy fallback always works
+    piqe_status = 'numpy fallback ✓'
+
+    # BRISQUE backend detection
+    brisque_status = 'NOT AVAILABLE (pip install piq  OR  pip install brisque)'
     try:
-        import piq
-        print(f'  BRISQUE/PIQE : piq {piq.__version__} ✓')
-        return
+        import piq  # noqa
+        brisque_status = f'piq {piq.__version__} ✓'
+        piqe_status    = f'piq {piq.__version__} ✓'
     except ImportError:
-        pass
-    try:
-        import cv2.quality  # noqa
-        print('  BRISQUE      : cv2.quality (opencv-contrib) ✓')
-        print('  PIQE         : not available (install piq)')
-        return
-    except (ImportError, AttributeError):
-        pass
-    print('  BRISQUE/PIQE : NOT AVAILABLE — scores will be nan')
-    print('                 Install with: pip install piq')
+        try:
+            import cv2.quality  # noqa
+            brisque_status = 'cv2.quality (opencv-contrib) ✓'
+        except (ImportError, AttributeError):
+            try:
+                from brisque import BRISQUE  # noqa
+                brisque_status = 'brisque package ✓'
+            except ImportError:
+                pass
+
+    print(f'  BRISQUE backend : {brisque_status}')
+    print(f'  PIQE    backend : {piqe_status}')
 
 
 # ── CLI ───────────────────────────────────────────────────────────────── #
