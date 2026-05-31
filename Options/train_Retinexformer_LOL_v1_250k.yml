@@ -1,0 +1,135 @@
+# Retinexformer A0 — LOL-v1 Training Config (PAPER-ACCURATE: 250k iters)
+#
+# Fixes two problems in train_Retinexformer_LOL_v1_fixed.yml:
+#
+#   1. total_iter: 250000   — paper says 2.5×10^5; released config had 150k (60%)
+#
+#   2. scheduler: single cosine cycle 2e-4 → 1e-6 over 250k
+#      Paper says "steadily decreased to 1e-6 by cosine annealing" (monotone).
+#      Released config had a warmup phase (LR rose 2e-4→3e-4 in first 46k iters)
+#      which does not match the paper description.
+#
+#   3. clip_grad_norm: 0.01 — restored to the value that was hardcoded in the
+#      original codebase; the 0.01 clip was tuned alongside the 150k schedule.
+#      At 250k with correct schedule this may need further tuning, but we start
+#      by matching the original recipe as closely as possible.
+#
+# Launch command (GPU machine, from repo root):
+#   python -m basicsr.train --opt Options/train_Retinexformer_LOL_v1_250k.yml
+#
+# Saves to: experiments/train_Retinexformer_LOL_v1_250k/
+# -----------------------------------------------------------------------
+
+name: train_Retinexformer_LOL_v1_250k
+model_type: ImageCleanModel
+scale: 1
+num_gpu: 1
+manual_seed: 100
+
+# dataset and data loader settings
+datasets:
+  train:
+    name: TrainSet
+    type: Dataset_PairedImage
+    dataroot_gt: data/LOLv1/Train/target
+    dataroot_lq: data/LOLv1/Train/input
+    geometric_augs: true
+
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+    use_shuffle: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 8
+
+    mini_batch_sizes: [8]
+    iters: [300000]
+    gt_size: 128
+    gt_sizes: [128]
+
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    name: ValSet
+    type: Dataset_PairedImage
+    dataroot_gt: data/LOLv1/Test/target
+    dataroot_lq: data/LOLv1/Test/input
+    io_backend:
+      type: disk
+
+# network structures — original Retinexformer, unchanged
+network_g:
+  type: RetinexFormer
+  in_channels: 3
+  out_channels: 3
+  n_feat: 40
+  stage: 1
+  num_blocks: [1, 2, 2]
+
+# path
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+# training settings
+train:
+  total_iter: 250000           # PAPER: "2.5 × 10^5 iterations"
+  warmup_iter: -1
+  use_grad_clip: true
+  clip_grad_norm: 0.01         # original hardcoded value — matches paper recipe
+
+  # Single cosine cycle: 2e-4 → 1e-6 over 250k iters (monotone decrease).
+  # Matches paper: "LR initially set to 2×10^-4 and steadily decreased to 1×10^-6".
+  # Using CosineAnnealingRestartCyclicLR with one period = simple cosine anneal.
+  scheduler:
+    type: CosineAnnealingRestartCyclicLR
+    periods: [250000]
+    restart_weights: [1]
+    eta_mins: [0.000001]
+
+  mixing_augs:
+    mixup: true
+    mixup_beta: 1.2
+    use_identity: true
+
+  optim_g:
+    type: Adam
+    lr: !!float 2e-4
+    betas: [0.9, 0.999]
+
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1
+    reduction: mean
+
+# validation settings
+val:
+  window_size: 4
+  val_freq: !!float 1e3
+  save_img: false
+  rgb2bgr: true
+  use_image: false
+  max_minibatch: 8
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+
+# logging settings
+logger:
+  print_freq: 500
+  save_checkpoint_freq: !!float 5e3   # 50 checkpoints over 250k iters
+  use_tb_logger: true
+  wandb:
+    project: retinexformer-250k
+    resume_id: ~
+
+# dist training settings
+dist_params:
+  backend: nccl
+  port: 29500
