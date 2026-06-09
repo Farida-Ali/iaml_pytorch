@@ -1,0 +1,140 @@
+# FD²RT A7-lite1 — LOL-v1 Training Config (loss-weight sweep variant 1)
+# ==============================================================================
+# Architecture: FD2RT_A4 (W-IE + Dual-Domain DDA) — UNCHANGED from A4/A7.
+# Model wrapper: FD2RT_A7_Model — UNCHANGED from A7.
+#
+# Loss (ONLY change vs A7 original):
+#   L_total = L1(I_en, I_gt)          [weight 1.0,  identical to A7]
+#           + 0.05 * L_freq           [FrequencyAwareLoss, w_low=1.0, w_high=1.5]
+#           + 0.01 * L_tv_illum       [IlluminationTVLoss on W-IE LL subband]
+#
+# Rationale: A7 original (freq=0.1, w_high=2.0) dropped PSNR 0.49 dB vs A4.
+#   Halving freq weight + softening w_high to 1.5 to reduce high-freq penalty.
+#
+# Everything else (LR, iters, batch, patch, scheduler, grad-clip, seed) is
+# byte-for-byte identical to train_FD2RT_A7_LOL_v1.yml.
+# ------------------------------------------------------------------------------
+
+name: train_FD2RT_A7lite1_LOL_v1
+model_type: FD2RT_A7_Model
+scale: 1
+num_gpu: 1
+manual_seed: 100
+
+# ── Dataset ──────────────────────────────────────────────────────────── #
+datasets:
+  train:
+    name: TrainSet
+    type: Dataset_PairedImage
+    dataroot_gt: data/LOLv1/Train/target
+    dataroot_lq: data/LOLv1/Train/input
+    geometric_augs: true
+
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+    use_shuffle: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 8
+
+    mini_batch_sizes: [8]
+    iters: [300000]
+    gt_size: 128
+    gt_sizes: [128]
+
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    name: ValSet
+    type: Dataset_PairedImage
+    dataroot_gt: data/LOLv1/Test/target
+    dataroot_lq: data/LOLv1/Test/input
+    io_backend:
+      type: disk
+
+# ── Architecture (UNCHANGED from A4/A7) ──────────────────────────────── #
+network_g:
+  type: FD2RT_A4
+  in_channels: 3
+  out_channels: 3
+  n_feat: 40
+  stage: 1
+  num_blocks: [1, 2, 2]
+
+# ── Paths ─────────────────────────────────────────────────────────────── #
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+# ── Training (identical hyperparameters to A4/A7) ─────────────────────── #
+train:
+  total_iter: 250000
+  warmup_iter: -1
+  use_grad_clip: true
+  clip_grad_norm: 1.0
+
+  scheduler:
+    type: CosineAnnealingRestartCyclicLR
+    periods: [77000, 173000]
+    restart_weights: [1, 1]
+    eta_mins: [0.0003, 0.000001]
+
+  mixing_augs:
+    mixup: true
+    mixup_beta: 1.2
+    use_identity: true
+
+  optim_g:
+    type: Adam
+    lr: !!float 2e-4
+    betas: [0.9, 0.999]
+
+  # ── Losses ─────────────────────────────────────────────────────────── #
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1
+    reduction: mean
+
+  # SWEEP: halved weight, softer w_high
+  freq_opt:
+    type: FrequencyAwareLoss
+    loss_weight: 0.05
+    w_low: 1.0
+    w_high: 1.5
+    cutoff_div: 8.0
+
+  tv_opt:
+    type: IlluminationTVLoss
+    loss_weight: 0.01
+
+# ── Validation ───────────────────────────────────────────────────────── #
+val:
+  window_size: 4
+  val_freq: !!float 1e3
+  save_img: false
+  rgb2bgr: true
+  use_image: false
+  max_minibatch: 8
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+
+# ── Logging ──────────────────────────────────────────────────────────── #
+logger:
+  print_freq: 500
+  save_checkpoint_freq: !!float 5e3
+  use_tb_logger: true
+  wandb:
+    project: fd2rt-a7
+    resume_id: ~
+
+# ── Distributed ──────────────────────────────────────────────────────── #
+dist_params:
+  backend: nccl
+  port: 29500

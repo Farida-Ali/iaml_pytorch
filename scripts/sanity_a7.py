@@ -1,9 +1,9 @@
 """
 scripts/sanity_a7.py
 ────────────────────
-Step-4 sanity check for FD²RT A7. Runs the real A7 training step (A4 net +
-LL hook + L_pix + L_freq + L_tv) on real LOL-v1 patches and logs every
-component plus its magnitude RATIO to the main L1 loss.
+Step-4 sanity check for FD²RT A7 and all sweep variants. Runs the real A7
+training step (A4 net + LL hook + L_pix + L_freq + L_tv) on real LOL-v1
+patches and logs every component plus its magnitude RATIO to the main L1 loss.
 
 This mirrors what FD2RT_A7_Model.optimize_parameters does, in a lean loop so
 it can run anywhere (CPU smoke test or GPU full run).
@@ -11,12 +11,21 @@ it can run anywhere (CPU smoke test or GPU full run).
 GPU full run (the real 2000-iter gate):
   python scripts/sanity_a7.py --device cuda --batch 8 --iters 2000 --log_every 200
 
+A7-lite1 (freq_weight=0.05, w_high=1.5):
+  python scripts/sanity_a7.py --freq_weight 0.05 --w_high 1.5 --label A7-lite1
+
+A7-lite2 (freq_weight=0.02, w_high=1.0, tv_weight=0.005):
+  python scripts/sanity_a7.py --freq_weight 0.02 --w_high 1.0 --tv_weight 0.005 --label A7-lite2
+
+A7-tv-only (no freq loss):
+  python scripts/sanity_a7.py --no_freq --label A7-tv-only
+
 Quick local smoke (CPU, default):
   python scripts/sanity_a7.py
 
 Success criteria (checked + printed at the end):
   (a) total loss decreases, no spike > 3× running median (after warmup)
-  (b) weighted L_freq in ~5-30% of L1 ; weighted L_tv < 10% of L1 ; both > 0
+  (b) weighted L_freq in ~2-30% of L1 ; weighted L_tv < 10% of L1 ; active terms > 0
   (c) no NaN in any component
 """
 import sys, os, argparse, glob, random
@@ -64,10 +73,27 @@ def main():
     ap.add_argument('--lr', type=float, default=2e-4)
     ap.add_argument('--no_ckpt', action='store_true',
                     help='start from random init instead of the A4 checkpoint')
+    # Loss weight overrides for sweep variants
+    ap.add_argument('--freq_weight', type=float, default=0.1,
+                    help='loss_weight for FrequencyAwareLoss (default: 0.1)')
+    ap.add_argument('--w_low', type=float, default=1.0,
+                    help='w_low for FrequencyAwareLoss (default: 1.0)')
+    ap.add_argument('--w_high', type=float, default=2.0,
+                    help='w_high for FrequencyAwareLoss (default: 2.0)')
+    ap.add_argument('--tv_weight', type=float, default=0.01,
+                    help='loss_weight for IlluminationTVLoss (default: 0.01)')
+    ap.add_argument('--no_freq', action='store_true',
+                    help='disable L_freq entirely (tv-only ablation)')
+    ap.add_argument('--label', default='',
+                    help='optional variant label for printout (e.g. A7-lite1)')
     args = ap.parse_args()
 
     torch.manual_seed(100)
     device = args.device
+
+    label = f' [{args.label}]' if args.label else ''
+    print(f'[config{label}] freq_weight={args.freq_weight if not args.no_freq else "DISABLED"}'
+          f'  w_low={args.w_low}  w_high={args.w_high}  tv_weight={args.tv_weight}')
 
     net = FD2RT_A4(in_channels=3, out_channels=3, n_feat=40,
                    stage=1, num_blocks=[1, 2, 2]).to(device)
@@ -86,8 +112,10 @@ def main():
             break
 
     cri_pix = torch.nn.L1Loss()
-    cri_freq = FrequencyAwareLoss(loss_weight=0.1, w_low=1.0, w_high=2.0).to(device)
-    cri_tv = IlluminationTVLoss(loss_weight=0.01).to(device)
+    cri_freq = (None if args.no_freq else
+                FrequencyAwareLoss(loss_weight=args.freq_weight,
+                                   w_low=args.w_low, w_high=args.w_high).to(device))
+    cri_tv = IlluminationTVLoss(loss_weight=args.tv_weight).to(device)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr, betas=(0.9, 0.999))
 
     lq_all, gt_all = load_pairs(max(args.batch * 4, 16), args.crop)
@@ -95,7 +123,8 @@ def main():
     n_pool = lq_all.shape[0]
 
     net.train()
-    print(f'\n{"iter":>5} {"l_total":>10} {"l_pix":>10} {"l_freq":>10} '
+    freq_hdr = 'l_freq' if cri_freq is not None else '(no freq)'
+    print(f'\n{"iter":>5} {"l_total":>10} {"l_pix":>10} {freq_hdr:>10} '
           f'{"l_tv":>10} {"freq/pix%":>10} {"tv/pix%":>9}')
     print('─' * 70)
 
@@ -108,7 +137,7 @@ def main():
         captured.clear()
         out = net(lq)
         l_pix = cri_pix(out, gt)
-        l_freq = cri_freq(out, gt)
+        l_freq = cri_freq(out, gt) if cri_freq is not None else torch.zeros(1, device=device)
         l_tv = cri_tv(captured['LL'])
         l_total = l_pix + l_freq + l_tv
         l_total.backward()
@@ -140,9 +169,13 @@ def main():
     # ratio bands on the average over the run
     avg_freq_ratio = np.mean([r['freq_ratio'] for r in rows])
     avg_tv_ratio = np.mean([r['tv_ratio'] for r in rows])
-    freq_band = 5.0 <= avg_freq_ratio <= 30.0
+    # freq band: 2-30% when active; treat as pass if freq is disabled
+    freq_active = cri_freq is not None
+    freq_band = (not freq_active) or (2.0 <= avg_freq_ratio <= 30.0)
     tv_band = avg_tv_ratio < 10.0
-    both_active = all(r['freq'] > 0 and r['tv'] > 0 for r in rows)
+    # active check: only for enabled terms
+    active_ok = ((not freq_active or all(r['freq'] > 0 for r in rows)) and
+                 all(r['tv'] > 0 for r in rows))
 
     print('\n' + '═' * 70)
     print('SANITY CRITERIA')
@@ -154,13 +187,16 @@ def main():
          f'(max {max_spike:.4f} vs 3×median {3*med:.4f})')
     line('(a) total loss trending down', decreasing,
          f'(first-q {np.mean(totals[:q]):.4f} → last-q {np.mean(totals[-q:]):.4f})')
-    line('(b) weighted L_freq in 5-30% of L1', freq_band,
-         f'(avg {avg_freq_ratio:.2f}%)')
+    if freq_active:
+        line('(b) weighted L_freq in 2-30% of L1', freq_band,
+             f'(avg {avg_freq_ratio:.2f}%)')
+    else:
+        line('(b) L_freq disabled (tv-only ablation)', True, '(skipped)')
     line('(b) weighted L_tv < 10% of L1', tv_band,
          f'(avg {avg_tv_ratio:.2f}%)')
-    line('(b) L_freq & L_tv both active (>0)', both_active)
+    line('(b) active loss terms > 0', active_ok)
 
-    passed = finite and no_spike and freq_band and tv_band and both_active
+    passed = finite and no_spike and freq_band and tv_band and active_ok
     print('\n' + ('SANITY PASSED' if passed else 'SANITY NEEDS REVIEW'))
     if not (freq_band and tv_band):
         print('  → A weighted component is outside its target band; '
