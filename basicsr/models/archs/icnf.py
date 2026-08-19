@@ -74,10 +74,22 @@ class ICNF(nn.Module):
         window (int): box window (in LL-resolution pixels) over which
             high-frequency energy is pooled. Odd.
         eps (float): numerical floor.
-        mode (str): 'subtract' -> max(0, E - v) / (v + eps)   [default]
+        mode (str): 'subtract' -> softplus((E - v) / (v + eps))   [default]
                     'ratio'    -> E / (v + eps)
             Both were measured; 'subtract' scored slightly higher at high
             texture-to-noise ratio (0.9237 vs 0.8697 at TNR 0.708).
+
+            NOTE on the softplus. The obvious form of 'subtract' is
+            max(0, E - v)/(v + eps), but a hard clamp has zero gradient
+            everywhere the high-frequency energy sits below the floor -- which
+            in a low-light frame is most dark, smooth regions, i.e. most of the
+            image. That silently freezes the sensor parameters and every gate
+            downstream. Normalising FIRST bounds z = (E - v)/(v + eps) below at
+            -1 (since E >= 0), and softplus(z) is then strictly positive with
+            healthy gradient across the whole range: softplus(-1) = 0.31 with
+            slope 0.27, while for large z it converges to z, matching the hard
+            version where it matters.
+        softplus_beta (float): sharpness of that transition.
         detach_illum (bool): treat the illumination input as a constant when
             computing the floor. Keeps ICNF a *conditioning* signal and stops
             the network from trivially lowering the predicted floor to inflate
@@ -86,7 +98,8 @@ class ICNF(nn.Module):
     """
 
     def __init__(self, a_init=0.02, b_init=1e-5, learn_params=True,
-                 window=9, eps=1e-8, mode='subtract', detach_illum=True):
+                 window=9, eps=1e-8, mode='subtract', detach_illum=True,
+                 softplus_beta=1.0):
         super().__init__()
         if window % 2 == 0:
             raise ValueError(f'window must be odd, got {window}')
@@ -98,6 +111,7 @@ class ICNF(nn.Module):
         self.eps = eps
         self.mode = mode
         self.detach_illum = detach_illum
+        self.softplus_beta = softplus_beta
 
         log_a = torch.log(torch.tensor(float(a_init)))
         log_b = torch.log(torch.tensor(float(b_init)))
@@ -194,7 +208,10 @@ class ICNF(nn.Module):
         v = self.noise_floor(illum)             # [B, C, H/2, W/2]
 
         if self.mode == 'subtract':
-            evidence = (E - v).clamp_min(0.0) / (v + self.eps)
+            # Normalise before the soft rectifier so z is bounded below at -1
+            # and the gradient stays alive even where E is far under the floor.
+            z = (E - v) / (v + self.eps)
+            evidence = F.softplus(z, beta=self.softplus_beta)
         else:
             evidence = E / (v + self.eps)
 
@@ -231,7 +248,7 @@ class ICNFGate(nn.Module):
     opens as training pushes `bias` down.
     """
 
-    def __init__(self, slope_init=1.0, bias_init=6.0, learnable=True):
+    def __init__(self, slope_init=1.0, bias_init=2.0, learnable=True):
         super().__init__()
         slope = torch.tensor(float(slope_init))
         bias = torch.tensor(float(bias_init))

@@ -77,8 +77,17 @@ def test_shapes_and_params():
     gate = g(ev)
     check('gate in (0,1)', gate.min() > 0 and gate.max() < 1,
           f'[{gate.min().item():.4f}, {gate.max().item():.4f}]')
-    check('gate starts near-closed (reduces to spatial-only at init)',
-          gate.mean().item() < 0.25, f'(mean {gate.mean().item():.4f})')
+    # NOT "gate is small". A shut gate starves its own mechanism of gradient
+    # (measured: 13x less signal at bias 6.0 than 2.0). What matters is that the
+    # gate sits in a RESPONSIVE part of the sigmoid so gradient flows, and that
+    # near-A1 behaviour at init comes from the small out_proj instead. The
+    # architecture-level test asserts that directly (P2.3).
+    gm = gate.mean().item()
+    check('gate starts in a responsive (unsaturated) range', 0.02 < gm < 0.95,
+          f'(mean {gm:.4f})')
+    slope = (gate * (1 - gate)).mean().item()   # local sigmoid gradient
+    check('gate passes gradient (not saturated)', slope > 0.01,
+          f"(mean sigmoid' {slope:.4f})")
 
     check('odd-window enforced', _raises(lambda: ICNF(window=8), ValueError))
     check('bad mode rejected', _raises(lambda: ICNF(mode='nope'), ValueError))
