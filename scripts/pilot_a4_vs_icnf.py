@@ -108,7 +108,7 @@ def run_one(model_name, seed, train_imgs, val_lq, val_gt, args):
     gen = torch.Generator().manual_seed(seed)
 
     kw = dict(in_channels=3, out_channels=3, n_feat=args.n_feat,
-              stage=1, num_blocks=[1, 1, 1])
+              stage=1, num_blocks=[int(x) for x in args.num_blocks.split(',')])
     if model_name == 'A4':
         net = FD2RT_A4(**kw)
     elif model_name == 'A4nz':
@@ -163,6 +163,8 @@ def main():
     ap.add_argument('--batch', type=int, default=4)
     ap.add_argument('--patch', type=int, default=64)
     ap.add_argument('--n_feat', type=int, default=16)
+    ap.add_argument('--num_blocks', default='1,1,1',
+                    help="denoiser blocks per level; '1,2,2' is the real LOL-v1 config")
     ap.add_argument('--lr', type=float, default=2e-4)
     ap.add_argument('--a', type=float, default=0.02)
     ap.add_argument('--b', type=float, default=1e-5)
@@ -196,7 +198,7 @@ def main():
     print('=' * 80)
     print(f'  train images : {len(train_imgs)}    val images: {len(val_gt)}')
     print(f'  iters {args.iters}  batch {args.batch}  patch {args.patch}  '
-          f'n_feat {args.n_feat}  seeds {args.seeds}')
+          f'n_feat {args.n_feat}  num_blocks {args.num_blocks}  seeds {args.seeds}')
     print(f'  degradation  : mean {args.mean}, '
           f'{"MISMATCHED (heavy-tailed, signal-independent)" if args.mismatch else f"Poisson-Gaussian a={args.a} b={args.b}"}')
     if not args.mismatch:
