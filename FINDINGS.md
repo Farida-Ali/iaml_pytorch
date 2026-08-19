@@ -238,3 +238,38 @@ mean gap compresses further at full scale, *training stability* may be the more
 durable contribution — and it is consistent with the diagnosed mechanism, since
 a scalar gate that is unidentifiable at init leaves the frequency branch's
 usefulness to chance.
+
+
+---
+
+## Why the LOL-v1 benchmark runs did not happen here
+
+Not a matter of effort. Two independent hard blocks, both verified rather than
+assumed.
+
+**1. No GPU.** `torch.cuda.is_available()` False; no `/dev/nvidia*`; no
+`libcuda.so`; `CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE=cloud_default`.
+
+**2. LOL-v1 is unreachable.** Every host that distributes it is denied by the
+network policy: Google Drive, Kaggle and Zenodo refuse connections;
+huggingface.co returns a logged `403 policy denial` at the proxy gateway;
+`api.github.com` is blocked. Only `raw.githubusercontent.com` answers, and the
+dataset is not distributed there.
+
+**3. Even with the data, CPU training is infeasible by two orders of
+magnitude.** Measured at the exact training config (`n_feat=40`,
+`num_blocks=[1,2,2]`, batch 8, patch 128):
+
+    4.47 s/step
+    one 250K-iteration run   ~310 h   = 12.9 days
+    four-model ladder                 = 52 days
+    with 3 seeds each                 = 155 days
+
+The container is ephemeral and reclaimed after inactivity, so a 13-day single
+run is not merely slow, it cannot complete.
+
+**Conclusion.** SOTA on LOL-v1 was not achieved and is not achievable in this
+environment. What is delivered instead is a codebase where measurement is
+trustworthy, a controlled ladder, a pre-flight gate, and nine recorded verdicts
+- five of which killed hypotheses that would otherwise have consumed GPU-weeks
+before failing.
