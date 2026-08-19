@@ -109,7 +109,21 @@ def run_one(model_name, seed, train_imgs, val_lq, val_gt, args):
 
     kw = dict(in_channels=3, out_channels=3, n_feat=args.n_feat,
               stage=1, num_blocks=[1, 1, 1])
-    net = FD2RT_A4(**kw) if model_name == 'A4' else FD2RT_ICNF(**kw)
+    if model_name == 'A4':
+        net = FD2RT_A4(**kw)
+    elif model_name == 'A4nz':
+        # CONTROL ARM. ICNF differs from A4 in two ways at once: the spatial
+        # evidence gate (the mechanism under test) AND a nonzero out_proj init,
+        # which ICNF needs because a zero-init frequency branch makes its gate
+        # unidentifiable. Without this arm, a win could be attributed to either.
+        # A4nz is plain A4 with only the init changed, so ICNF-vs-A4nz isolates
+        # the gate mechanism and A4nz-vs-A4 isolates the init.
+        net = FD2RT_A4(**kw)
+        for nm, mod in net.named_modules():
+            if 'freq_blocks' in nm and nm.endswith('out_proj'):
+                torch.nn.init.normal_(mod.weight, mean=0.0, std=1e-3)
+    else:
+        net = FD2RT_ICNF(**kw)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr, betas=(0.9, 0.999))
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.iters,
                                                        eta_min=args.lr * 0.01)
@@ -147,6 +161,8 @@ def main():
     ap.add_argument('--b', type=float, default=1e-5)
     ap.add_argument('--mean', type=float, default=0.12)
     ap.add_argument('--mismatch', action='store_true')
+    ap.add_argument('--arms', default='A4,ICNF',
+                    help='comma list from A4,A4nz,ICNF. A4nz is the init control.')
     ap.add_argument('--verbose', action='store_true')
     ap.add_argument('--out', default='results/pilot_a4_vs_icnf.json')
     args = ap.parse_args()
@@ -181,21 +197,29 @@ def main():
         print('        is a favourable test. A win is necessary, not sufficient.')
     print()
 
-    results = {'A4': [], 'ICNF': []}
+    arms = args.arms.split(',')
+    results = {a: [] for a in arms}
     for seed in range(args.seeds):
-        for name in ('A4', 'ICNF'):
+        for name in arms:
             p, secs = run_one(name, seed, train_imgs, val_lq, val_gt, args)
             results[name].append(p)
             print(f'  seed {seed}  {name:<5} val PSNR {p:7.4f} dB   ({secs:.0f}s)',
                   flush=True)
 
-    a4 = np.array(results['A4']); ic = np.array(results['ICNF'])
     print()
     print('=' * 80)
     print(f'{"model":<8} {"PSNR mean":>11} {"std":>8} {"runs":>6}')
     print('-' * 80)
-    print(f'{"A4":<8} {a4.mean():>11.4f} {a4.std():>8.4f} {len(a4):>6}')
-    print(f'{"ICNF":<8} {ic.mean():>11.4f} {ic.std():>8.4f} {len(ic):>6}')
+    for a in arms:
+        v = np.array(results[a])
+        print(f'{a:<8} {v.mean():>11.4f} {v.std():>8.4f} {len(v):>6}')
+    print('-' * 80)
+    for i in range(len(arms)):
+        for j in range(i + 1, len(arms)):
+            u, v = np.array(results[arms[i]]), np.array(results[arms[j]])
+            print(f'  {arms[j]} - {arms[i]:<6}: {v.mean()-u.mean():+.4f} dB   '
+                  f'(paired wins {int((v > u).sum())}/{len(u)})')
+    a4 = np.array(results[arms[0]]); ic = np.array(results[arms[-1]])
     d = ic.mean() - a4.mean()
     wins = int((ic > a4).sum())
     print('-' * 80)
