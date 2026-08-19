@@ -122,13 +122,36 @@ def run_one(model_name, seed, train_imgs, val_lq, val_gt, args):
         for nm, mod in net.named_modules():
             if 'freq_blocks' in nm and nm.endswith('out_proj'):
                 torch.nn.init.normal_(mod.weight, mean=0.0, std=1e-3)
+    elif model_name == 'A4const':
+        # CONTROL ARM. ICNFc's gate averages ~0.278 on real content while A4's
+        # scalar gate sits at sigmoid(0) = 0.5. So ICNFc changes TWO things at
+        # once again: the spatial variation of the gate AND its mean level.
+        # A4const is A4 with the identifiability fix (nonzero freq init) plus a
+        # scalar gate pinned to ICNFc's mean level -- same average mixing, ZERO
+        # spatial variation. ICNFc - A4const therefore isolates spatial
+        # adaptivity alone. If they tie, the contribution is just "A4's gate
+        # level is mis-set", which is a one-line fix, not a mechanism.
+        net = FD2RT_A4(**kw)
+        for nm, mod in net.named_modules():
+            if 'freq_blocks' in nm and nm.endswith('out_proj'):
+                torch.nn.init.normal_(mod.weight, mean=0.0, std=1e-3)
+        logit = math.log(args.gate_level / (1.0 - args.gate_level))
+        n_set = 0
+        for mod in net.modules():
+            if hasattr(mod, 'gates') and isinstance(mod.gates, torch.nn.ParameterList):
+                for g in mod.gates:
+                    with torch.no_grad():
+                        g.fill_(logit)
+                    n_set += 1
+        assert n_set > 0, 'A4const: found no scalar gates to set'
     elif model_name == 'ICNFc':
         # CONTROL ARM. Full ICNF except the noise floor is spatially UNIFORM
         # (illum_source='constant'): same per-pixel gate, but conditioned only on
         # the HF energy, not on illumination. ICNF-vs-ICNFc isolates whether
         # conditioning the floor on illumination adds anything over a bare
         # adaptive gate — the question the mismatched-noise result forced open.
-        net = FD2RT_ICNF(**kw, illum_source='constant')
+        net = FD2RT_ICNF(**kw, illum_source='constant',
+                         gate_bias=args.gate_bias)
     else:
         net = FD2RT_ICNF(**kw)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr, betas=(0.9, 0.999))
@@ -163,6 +186,13 @@ def main():
     ap.add_argument('--batch', type=int, default=4)
     ap.add_argument('--patch', type=int, default=64)
     ap.add_argument('--n_feat', type=int, default=16)
+    ap.add_argument('--gate_level', type=float, default=0.278,
+                    help="A4const's fixed scalar gate value; 0.278 is ICNFc's "
+                         "measured mean gate on the real corpus.")
+    ap.add_argument('--gate_bias', type=float, default=2.0,
+                    help='ICNFGate operating point. Tuned at n_feat=16; the '
+                         'evidence distribution shifts with channel width, so '
+                         'this likely needs recalibrating at production scale.')
     ap.add_argument('--num_blocks', default='1,1,1',
                     help="denoiser blocks per level; '1,2,2' is the real LOL-v1 config")
     ap.add_argument('--lr', type=float, default=2e-4)
