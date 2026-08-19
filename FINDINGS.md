@@ -20,7 +20,7 @@ Reproduce: `python3 scripts/pilot_a4_vs_icnf.py --arms <arms> --seeds 4 --iters 
 | H5 | Conditioning the noise floor on illumination helps | **REFUTED** — *harmful*; uniform floor is +0.53 dB better, 4/4 seeds |
 | H6 | Adaptive computation via evidence is a viable contribution | **REJECTED** — measured, did not pay for itself |
 | H7 | A per-pixel gate beats A4's scalar gate | **SUPPORTED so far** — +1.73 dB, 4/4 seeds, +2.26 pooled sd |
-| H8 | That gain is the gate, not merely the init fix | **UNDER TEST** (P9) |
+| H8 | That gain is the gate, not merely the init fix | **SUPPORTED** — gate +1.53 dB (4/4); init alone +0.20 dB (2/4, null) |
 
 ---
 
@@ -128,16 +128,49 @@ never have moved off its initial value across an entire training run.
 
 ---
 
-## P9 — init fix vs spatial gate (in progress)
+## P9 — init fix vs spatial gate: the gate is real
 
 `ICNFc` differs from A4 in **two** ways, not one: nonzero `out_proj` init *and*
-the per-pixel gate. `A4nz` is plain A4 with only the init changed.
+the per-pixel gate. `A4nz` is plain A4 with only the init changed, so the two
+effects can be separated.
 
-- `A4nz − A4` isolates the initialisation fix
-- `ICNFc − A4nz` isolates the gate mechanism
+| model | mean | std |
+|---|---|---|
+| A4 (scalar gate, zero-init) | 17.9991 | 0.739 |
+| A4nz (A4 + nonzero init only) | 18.2030 | 0.867 |
+| **ICNFc (per-pixel gate)** | **19.7281** | 0.579 |
 
-If `A4nz` captures most of the +1.73 dB, the contribution reduces to
-"A4 had an initialisation bug" — a paragraph, not a paper.
+| contrast | isolates | Δ | paired wins |
+|---|---|---|---|
+| A4nz − A4 | initialisation fix | +0.2038 dB | **2/4** |
+| **ICNFc − A4nz** | **the spatial gate** | **+1.5251 dB** | **4/4** |
+| ICNFc − A4 | both together | +1.7290 dB | 4/4 |
+
+**The initialisation fix explains almost none of the gain.** +0.20 dB at 2/4
+paired wins is a coin flip, and it sits well inside the ~0.8 dB seed spread —
+read it as null. Of the +1.73 dB total, **+1.53 dB (88%) is the per-pixel gate**,
+and that contrast is unanimous.
+
+The nonzero init remains **necessary** — without it the gate is unidentifiable
+(`out_proj` zero-init ⟹ `B ≡ 0` ⟹ `dL/d(gate) = 0`) — but it is **not
+sufficient**: on its own it buys nothing. The mechanism does the work.
+
+This was the live threat to the whole project: had `A4nz` captured the gain, the
+contribution would have collapsed to "A4 shipped an initialisation bug". It did not.
+
+### The surviving claim
+
+A4's scalar gate is a **defect**: one learned scalar per block cannot express
+"trust high frequencies *here* but not *there*", which is precisely the decision
+the block must make, because the same absolute high-frequency energy means
+texture in a lit region and noise in a shadow. It is also unidentifiable at
+initialisation, so it may never move off its initial value.
+
+Replacing it with a **per-pixel gate** driven by local high-frequency energy
+against a **uniform** noise floor recovers **+1.53 dB over A4nz, 4/4 seeds**.
+No Retinex physics, no wavelet-necessity argument — a gating mechanism whose
+failure mode is diagnosed and whose causal contribution is isolated by three
+controls (mismatched noise, constant floor, init-only).
 
 ---
 
