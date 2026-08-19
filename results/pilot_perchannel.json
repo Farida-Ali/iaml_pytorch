@@ -1,0 +1,37 @@
+{
+  "args": {
+    "data": "/tmp/corpus",
+    "iters": 1500,
+    "seeds": 4,
+    "batch": 4,
+    "patch": 64,
+    "n_feat": 40,
+    "gate_level": 0.278,
+    "gate_bias": 2.0,
+    "num_blocks": "1,2,2",
+    "lr": 0.0002,
+    "a": 0.02,
+    "b": 1e-05,
+    "mean": 0.12,
+    "mismatch": false,
+    "arms": "ICNFc,ICNFpc",
+    "verbose": false,
+    "out": "results/pilot_perchannel.json"
+  },
+  "results": {
+    "ICNFc": [
+      20.54195213317871,
+      22.8865168094635,
+      22.379883766174316,
+      20.708878755569458
+    ],
+    "ICNFpc": [
+      20.481959581375122,
+      23.438109040260315,
+      22.468937873840332,
+      22.006903052330017
+    ]
+  },
+  "delta_db": 0.46966952085494995,
+  "wins": 3
+}

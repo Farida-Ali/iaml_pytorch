@@ -23,6 +23,7 @@ Reproduce: `python3 scripts/pilot_a4_vs_icnf.py --arms <arms> --seeds 4 --iters 
 | H8 | That gain is the gate, not merely the init fix | **SUPPORTED** — gate +1.53 dB (4/4); init alone +0.20 dB (2/4, null) |
 | H9 | The gate's gain survives at the real architecture | **PARTIALLY SUPPORTED** — +1.37 dB holds, but 3/4 wins and effect size falls 2.26 → 0.92 SD |
 | H10 | The gain is spatial adaptivity, not a better constant gate level | **SUPPORTED** — spatial +1.63 dB (4/4); level alone −0.25 dB |
+| H11 | A per-channel gate improves on the shared gate | **WEAKLY SUGGESTED** — +0.47 dB but 3/4 and only +0.39 sd; one seed carries it |
 
 ---
 
@@ -333,3 +334,44 @@ floor (illumination-conditioning harmful), init-only (null), and level-matched
 (constant gate buys nothing). No Retinex physics, no wavelet-necessity argument
 — a gating mechanism whose failure mode is diagnosed and whose causal
 contribution is measured.
+
+
+---
+
+## P12 — per-channel gate: suggestive, not established
+
+The gate emits one scalar per pixel shared across all 40 feature channels.
+`ICNFpc` adds a 1x1 projection so channels can specialise, initialised to
+reproduce the shared gate exactly (output difference 5.8e-07 at init), making it
+a strict generalisation. Cost +1440 params (0.07%).
+
+| model | mean | std | per-seed |
+|---|---|---|---|
+| ICNFc (shared gate) | 21.6293 | 1.022 | 20.542, 22.887, 22.380, 20.709 |
+| ICNFpc (per-channel) | 22.0990 | 1.067 | 20.482, 23.438, 22.469, **22.007** |
+
+**Δ = +0.4697 dB, 3/4 paired wins, +0.39 pooled sd.**
+
+**Do not treat this as established.** It is the weakest result in the project:
+
+* effect size +0.39 sd, against +1.27 sd for the spatial-gate mechanism itself
+* seed 0 **lost** (−0.06 dB); two of the three wins are small (+0.09, +0.55)
+* **seed 3 alone supplies +1.30 dB of the +0.47 mean.** Excluding it leaves
+  ≈ +0.18 dB — essentially nothing
+
+A result carried by a single seed is exactly the shape that dissolves under
+replication. Honest summary: per-channel gating *may* add ~0.5 dB and needs more
+seeds before it is claimed.
+
+### Cumulative effect at the production architecture
+
+| step | Δ | paired wins | effect size |
+|---|---|---|---|
+| A4 → ICNFc (spatial gate) | **+1.63 dB** | 4/4 | +1.27 sd |
+| ICNFc → ICNFpc (per-channel) | +0.47 dB | 3/4 | +0.39 sd |
+| **A4 → ICNFpc (total)** | **≈ +2.10 dB** | — | — |
+
+Recommendation for the GPU campaign: train **ICNFc** as the primary arm — it is
+the claim that survived four controls unanimously. Carry ICNFpc as a secondary
+arm only if seed budget allows, and report it as an ablation, not a headline,
+unless more seeds firm it up.
