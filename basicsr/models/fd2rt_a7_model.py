@@ -76,33 +76,49 @@ class FD2RT_A7_Model(ImageCleanModel):
             self._register_ll_hook()
 
     def _register_ll_hook(self):
-        """Attach a forward hook on the W-IE's HaarDWT2D to capture LL.
+        """Attach a forward hook to capture the LEARNED illumination map.
 
-        The W-IE DWT lives at module path '...estimator.dwt'. The Freq_MSA
-        blocks also contain HaarDWT2D modules, but their paths end in
-        'freq_blocks.<i>.dwt', so matching on 'estimator.dwt' uniquely selects
-        the illumination-estimator DWT. With stage=1 there is exactly one.
+        WHY NOT THE DWT LL SUBBAND (the original target):
+            The hook used to sit on '...estimator.dwt', whose output is the Haar
+            decomposition of the RAW INPUT IMAGE. HaarDWT2D holds its filters in
+            register_buffer and has no parameters, and the input image is data,
+            so that tensor has requires_grad=False and grad_fn=None. The TV term
+            computed on it was a CONSTANT with respect to every network weight:
+            it contributed exactly zero gradient to every A7 run, and calling
+            .backward() on it alone raises. It never crashed only because the
+            total loss stayed differentiable through L_pix and L_freq.
+
+        THE CORRECT TARGET:
+            'estimator.conv2' emits illu_map -- the LEARNED illumination the
+            Retinex smoothness prior is actually supposed to constrain (W-IE
+            then forms I_lu = img * illu_map + img). It is in the autograd
+            graph, so the prior now does work.
+
+        scripts/test_p0_fixes.py asserts both halves of this: that the old
+        target has no grad_fn, and that the new one produces nonzero parameter
+        gradient.
         """
         net = self.get_bare_model(self.net_g)
         target_module = None
         target_name = None
         for name, module in net.named_modules():
-            if name.endswith('estimator.dwt'):
+            if name.endswith('estimator.conv2'):
                 target_module = module
                 target_name = name
                 break
         if target_module is None:
             raise RuntimeError(
-                'FD2RT_A7_Model: could not locate W-IE "estimator.dwt" module '
-                'to attach the LL-capture hook.')
+                'FD2RT_A7_Model: could not locate W-IE "estimator.conv2" '
+                '(illumination map) to attach the TV-supervision hook.')
 
         def _hook(_module, _inp, out):
-            # HaarDWT2D.forward returns (LL, LH, HL, HH); keep LL only.
-            self._captured_LL = out[0]
+            # conv2 emits illu_map [B, 3, H, W] -- the learned illumination.
+            self._captured_LL = out
 
         target_module.register_forward_hook(_hook)
         get_root_logger().info(
-            f'A7: LL-capture forward hook attached to "{target_name}".')
+            f'A7: illumination-map hook attached to "{target_name}" '
+            f'(TV prior now supervises a learned tensor).')
 
     # ── Optimization step: pixel + frequency + TV ────────────────────────── #
     def optimize_parameters(self, current_iter):
@@ -130,12 +146,21 @@ class FD2RT_A7_Model(ImageCleanModel):
                 loss_dict['l_freq'] = l_freq
                 l_total = l_total + l_freq
 
-            # NEW: illumination smoothness (TV) prior on the W-IE LL subband
+            # NEW: illumination smoothness (TV) prior on the learned illu_map
             if self.cri_tv is not None:
                 if self._captured_LL is None:
                     raise RuntimeError(
-                        'FD2RT_A7_Model: LL subband was not captured during '
-                        'forward — the hook did not fire.')
+                        'FD2RT_A7_Model: illumination map was not captured '
+                        'during forward — the hook did not fire.')
+                # Guard against the exact defect that shipped in A7: a target
+                # detached from the graph makes this term a constant with zero
+                # gradient, which trains nothing while still printing a
+                # plausible loss value. Fail loudly instead.
+                if self._captured_LL.grad_fn is None:
+                    raise RuntimeError(
+                        'FD2RT_A7_Model: the captured illumination tensor has '
+                        'grad_fn=None, so the TV prior would contribute zero '
+                        'gradient. The hook is on the wrong module.')
                 l_tv = self.cri_tv(self._captured_LL)
                 loss_dict['l_tv'] = l_tv
                 l_total = l_total + l_tv

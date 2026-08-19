@@ -114,8 +114,21 @@ class FrequencyAwareLoss(nn.Module):
         high_err = diff * m_high
 
         if self.reduction == 'mean':
-            l_low = low_err.mean()
-            l_high = high_err.mean()
+            # Reduce EACH BAND BY ITS OWN BIN COUNT, not by the full grid.
+            #
+            # Previously both bands used .mean(), which divides by the full
+            # rfft numel. The low-pass disc is only ~5% of the grid, so the low
+            # band was diluted ~20x while the high band (95% of the grid) was
+            # essentially undiluted. A configured w_low:w_high of 1:2 therefore
+            # acted as roughly 1:38, making the loss an almost pure
+            # high-frequency penalty -- the likely cause of the 0.49 dB PSNR
+            # regression in A7. Dividing by each band's own bin count makes both
+            # terms a genuine per-coefficient mean, so the configured weights
+            # mean what they say.
+            n_low = m_low.sum() * B * C
+            n_high = m_high.sum() * B * C
+            l_low = low_err.sum() / n_low.clamp_min(1.0)
+            l_high = high_err.sum() / n_high.clamp_min(1.0)
         else:  # sum
             l_low = low_err.sum()
             l_high = high_err.sum()

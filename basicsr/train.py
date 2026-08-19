@@ -35,8 +35,20 @@ def parse_options(is_train=True):
         default='none',
         help='job launcher')
     parser.add_argument('--local_rank', type=int, default=0)
+    parser.add_argument(
+        '--auto_resume', action='store_true', default=None,
+        help='Resume from the newest state in experiments/<name>/training_states/. '
+             'Off by default: an existing experiment directory raises instead of '
+             'being silently resumed. Can also be set with `auto_resume: true` '
+             'in the YAML.')
     args = parser.parse_args()
     opt = parse(args.opt, is_train=is_train)
+
+    # CLI flag wins when given; otherwise fall back to the YAML, then to off.
+    if args.auto_resume is not None:
+        opt['auto_resume'] = args.auto_resume
+    else:
+        opt['auto_resume'] = opt.get('auto_resume', False)
 
     # distributed settings
     if args.launcher == 'none':
@@ -147,6 +159,67 @@ def create_train_val_dataloader(opt, logger):  #train loader 和 val loader 一�
     return train_loader, train_sampler, val_loader, total_epochs, total_iters
 
 
+def resolve_auto_resume(opt, exp_root='experiments'):
+    """Decide whether to resume training, and from which state file.
+
+    History: this logic used to fire unconditionally. It globbed the
+    experiment's training_states/ directory and overwrote
+    opt['path']['resume_state'] even when the YAML explicitly said
+    `resume_state: ~`. A stale state file left in a freshly-named experiment
+    directory therefore hijacked the run silently -- in one case resuming at
+    iter == total_iter, so training exited after one second and reported a
+    validation number belonging to entirely different weights.
+
+    It is now opt-in (`auto_resume: true` in the YAML, or --auto_resume on the
+    command line), it announces itself, and it refuses two dangerous cases:
+
+      * states exist but auto_resume is off  -> raise, rather than silently
+        resuming or silently overwriting someone's run;
+      * auto_resume is on but the newest state is already at/past total_iter
+        -> raise, because resuming it trains for zero iterations.
+
+    Returns the path to resume from, or None to start fresh.
+    """
+    state_folder_path = os.path.join(exp_root, opt['name'], 'training_states')
+    try:
+        states = [s for s in os.listdir(state_folder_path) if s.endswith('.state')]
+    except OSError:
+        states = []
+
+    if not states:
+        return None
+
+    max_iter = max(int(s[:-len('.state')]) for s in states)
+    candidate = os.path.join(state_folder_path, '{}.state'.format(max_iter))
+    total_iter = opt.get('train', {}).get('total_iter', 0)
+
+    if not opt.get('auto_resume', False):
+        raise RuntimeError(
+            f'Experiment directory {exp_root}/{opt["name"]} already contains '
+            f'{len(states)} training state(s), newest at iter {max_iter}, but '
+            f'auto_resume is not enabled.\n'
+            f'Refusing to start silently -- this is exactly how a stale state '
+            f'once hijacked a run and produced a meaningless result.\n'
+            f'Pick one:\n'
+            f'  * move/remove {exp_root}/{opt["name"]} to start fresh, or\n'
+            f'  * choose a different `name:` in the config, or\n'
+            f'  * pass --auto_resume (or set `auto_resume: true`) to continue '
+            f'from iter {max_iter}.')
+
+    if total_iter and max_iter >= total_iter:
+        raise RuntimeError(
+            f'auto_resume would resume at iter {max_iter}, which is >= '
+            f'total_iter {total_iter}. That run is already complete, so '
+            f'resuming trains for zero iterations and reports a validation '
+            f'number for weights this config did not produce.\n'
+            f'Move {exp_root}/{opt["name"]} aside, or raise total_iter if you '
+            f'genuinely mean to extend training.')
+
+    print(f'[auto-resume] resuming {exp_root}/{opt["name"]} from iter '
+          f'{max_iter} ({candidate})', flush=True)
+    return candidate
+
+
 def main():
     # parse options, set distributed setting, set ramdom seed
     opt = parse_options(is_train=True)
@@ -154,21 +227,12 @@ def main():
     torch.backends.cudnn.benchmark = True
     # torch.backends.cudnn.deterministic = True
 
-    # automatic resume ..
-    state_folder_path = 'experiments/{}/training_states/'.format(opt['name']) #状态路径
-    import os
-    try:
-        states = os.listdir(state_folder_path)
-    except:
-        states = []
-
-    resume_state = None
-    if len(states) > 0: #如果路径已存在
-        max_state_file = '{}.state'.format(max([int(x[0:-6]) for x in states]))
-        resume_state = os.path.join(state_folder_path, max_state_file)
+    # Decide whether to resume (see resolve_auto_resume for the rationale).
+    resume_state = resolve_auto_resume(opt)
+    if resume_state is not None:
         opt['path']['resume_state'] = resume_state
 
-    # load resume states if necessary，resume_state是重新训练的时候接上的吗？
+    # load resume states if necessary
     if opt['path'].get('resume_state'):
         device_id = torch.cuda.current_device()
         resume_state = torch.load(

@@ -1,0 +1,147 @@
+# Retinexformer A0 — LADDER-ALIGNED baseline for the FD²RT ablation
+# ==============================================================================
+# WHY THIS FILE EXISTS
+#
+# There are two different questions, and they need two different configs:
+#
+#   Q1 "Can we reproduce the published Retinexformer?"
+#        -> Options/train_Retinexformer_LOL_v1_250k.yml
+#           (paper recipe: single cosine cycle, clip_grad_norm 0.01)
+#
+#   Q2 "What does the FD²RT architecture add, holding training fixed?"
+#        -> THIS FILE
+#
+# The A1/A4/A7 configs use clip_grad_norm 1.0 and a 2-cycle cosine schedule
+# (periods [77000, 173000], eta_mins [3e-4, 1e-6]), while the paper-accurate A0
+# uses clip 0.01 and a single cycle [250000] / [1e-6]. Comparing FD²RT against
+# that A0 therefore confounds the architecture change with TWO hyperparameter
+# changes, so an "improvement over baseline" cannot be attributed to the model.
+#
+# This config is byte-for-byte identical to train_FD2RT_A4_LOL_v1_fixed.yml in
+# every training hyperparameter. The ONLY differences are:
+#   network_g.type : RetinexFormer   (instead of FD2RT_A4)
+#   model_type     : ImageCleanModel (no extra loss terms)
+#
+# That makes A0 -> A1 -> A4 -> A4+ICNF a controlled ladder where each step
+# changes exactly one thing.
+#
+# Launch (GPU, from repo root):
+#   python -m basicsr.train --opt Options/train_Retinexformer_A0_ladder_LOL_v1.yml
+#
+# Saves to: experiments/train_Retinexformer_A0_ladder_LOL_v1/
+# ------------------------------------------------------------------------------
+
+name: train_Retinexformer_A0_ladder_LOL_v1
+model_type: ImageCleanModel
+scale: 1
+num_gpu: 1
+manual_seed: 100        # identical to A1/A4/A7
+
+# Off by default. An existing experiments/<name>/ now raises instead of being
+# silently resumed (see basicsr/train.py: resolve_auto_resume).
+auto_resume: false
+
+# ── Dataset (identical to A1/A4/A7) ──────────────────────────────────── #
+datasets:
+  train:
+    name: TrainSet
+    type: Dataset_PairedImage
+    dataroot_gt: data/LOLv1/Train/target
+    dataroot_lq: data/LOLv1/Train/input
+    geometric_augs: true
+
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+    use_shuffle: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 8
+
+    mini_batch_sizes: [8]
+    iters: [300000]
+    gt_size: 128
+    gt_sizes: [128]
+
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    name: ValSet
+    type: Dataset_PairedImage
+    dataroot_gt: data/LOLv1/Test/target
+    dataroot_lq: data/LOLv1/Test/input
+    io_backend:
+      type: disk
+
+# ── Architecture — the ONLY substantive difference from A1/A4/A7 ─────── #
+network_g:
+  type: RetinexFormer
+  in_channels: 3
+  out_channels: 3
+  n_feat: 40
+  stage: 1
+  num_blocks: [1, 2, 2]
+
+# ── Paths ─────────────────────────────────────────────────────────────── #
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+# ── Training (identical to A1/A4/A7) ─────────────────────────────────── #
+train:
+  total_iter: 250000
+  warmup_iter: -1
+  use_grad_clip: true
+  clip_grad_norm: 1.0     # matches the ladder, NOT the paper's 0.01
+
+  scheduler:
+    type: CosineAnnealingRestartCyclicLR
+    periods: [77000, 173000]
+    restart_weights: [1, 1]
+    eta_mins: [0.0003, 0.000001]
+
+  mixing_augs:
+    mixup: true
+    mixup_beta: 1.2
+    use_identity: true
+
+  optim_g:
+    type: Adam
+    lr: !!float 2e-4
+    betas: [0.9, 0.999]
+
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1
+    reduction: mean
+
+# ── Validation ───────────────────────────────────────────────────────── #
+val:
+  window_size: 4
+  val_freq: !!float 1e3
+  save_img: false
+  rgb2bgr: true
+  use_image: false
+  max_minibatch: 8
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+
+# ── Logging ──────────────────────────────────────────────────────────── #
+logger:
+  print_freq: 500
+  save_checkpoint_freq: !!float 5e3
+  use_tb_logger: true
+  wandb:
+    project: fd2rt-ladder
+    resume_id: ~
+
+# ── Distributed ──────────────────────────────────────────────────────── #
+dist_params:
+  backend: nccl
+  port: 29500
