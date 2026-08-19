@@ -76,7 +76,13 @@ network_g:
 
   # ICNF configuration. Defaults chosen by measurement — see
   # scripts/test_p2b_engagement.py and basicsr/models/archs/icnf.py.
-  illum_source: input      # 'input' (validated) | 'illu_map' (ablation arm)
+  # 'constant' = spatially UNIFORM noise floor. This is not the original design;
+  # it is what the evidence forced. The illumination-conditioned variant
+  # ('input') lost to it by 0.53 dB on 4/4 seeds (see FINDINGS.md, P8):
+  # dividing by a spatially-varying floor injects illumination structure into
+  # the evidence map, so the gate tracks brightness rather than texture.
+  # 'input'/'illu_map' are retained only as ablation arms for the paper.
+  illum_source: constant   # 'constant' (best) | 'input' | 'illu_map'
   icnf_mode: subtract      # 'subtract' (softplus) | 'ratio' (ablation arm)
   a_init: 0.02             # Poisson-Gaussian gain; calibrate per sensor via MAD
   b_init: 0.00001          # read-noise floor
