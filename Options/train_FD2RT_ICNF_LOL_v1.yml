@@ -1,0 +1,150 @@
+# FD²RT-ICNF — LOL-v1 (Illumination-Conditioned Noise Floor)
+# ==============================================================================
+# Ladder position: A0 -> A1 -> A4 -> ICNF. Every training hyperparameter is
+# identical to the other rungs (verified by scripts/check_ladder_alignment.py),
+# so the only variable is the architecture.
+#
+# What ICNF changes vs A4:
+#   - the 297-param unsupervised N_map  -> analytic evidence map (2 params)
+#   - the per-block scalar gate         -> per-pixel gate driven by that evidence
+#   Net parameter change: +10 against A4's 2,167,464.
+#
+# Loss is plain L1, exactly as A0/A1/A4. The frequency and TV losses are NOT
+# enabled here: A7 showed them costing 0.49 dB, and both were defective at the
+# time (freq weighted 1:38 instead of 1:2, TV contributing zero gradient). They
+# are now fixed but must be re-measured on their own rung rather than folded in
+# here, or ICNF's effect cannot be separated from theirs.
+#
+# Launch (GPU, from repo root):
+#   python -m basicsr.train --opt Options/train_FD2RT_ICNF_LOL_v1.yml
+#
+# Run scripts/preflight.py FIRST. It refuses to pass if any loss term is dead,
+# if the experiment directory holds stale state, or if the ladder has drifted.
+#
+# Saves to: experiments/train_FD2RT_ICNF_LOL_v1/
+# ------------------------------------------------------------------------------
+
+name: train_FD2RT_ICNF_LOL_v1
+model_type: ImageCleanModel
+scale: 1
+num_gpu: 1
+manual_seed: 100
+
+auto_resume: false      # an existing experiments/<name>/ now raises, not resumes
+
+# ── Dataset (identical to A0/A1/A4) ──────────────────────────────────── #
+datasets:
+  train:
+    name: TrainSet
+    type: Dataset_PairedImage
+    dataroot_gt: data/LOLv1/Train/target
+    dataroot_lq: data/LOLv1/Train/input
+    geometric_augs: true
+
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+    use_shuffle: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 8
+
+    mini_batch_sizes: [8]
+    iters: [300000]
+    gt_size: 128
+    gt_sizes: [128]
+
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    name: ValSet
+    type: Dataset_PairedImage
+    dataroot_gt: data/LOLv1/Test/target
+    dataroot_lq: data/LOLv1/Test/input
+    io_backend:
+      type: disk
+
+# ── Architecture ─────────────────────────────────────────────────────── #
+network_g:
+  type: FD2RT_ICNF
+  in_channels: 3
+  out_channels: 3
+  n_feat: 40
+  stage: 1
+  num_blocks: [1, 2, 2]
+
+  # ICNF configuration. Defaults chosen by measurement — see
+  # scripts/test_p2b_engagement.py and basicsr/models/archs/icnf.py.
+  illum_source: input      # 'input' (validated) | 'illu_map' (ablation arm)
+  icnf_mode: subtract      # 'subtract' (softplus) | 'ratio' (ablation arm)
+  a_init: 0.02             # Poisson-Gaussian gain; calibrate per sensor via MAD
+  b_init: 0.00001          # read-noise floor
+  learn_sensor: true       # learn (a, b) jointly
+  icnf_window: 9           # local energy pooling window (LL resolution)
+  gate_slope: 1.0
+  gate_bias: 2.0           # keeps the gate responsive; 6.0 starved it (13x less grad)
+  freq_init_std: 0.001     # nonzero so the gate is identifiable at step 0
+
+# ── Paths ─────────────────────────────────────────────────────────────── #
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+# ── Training (identical to A0/A1/A4) ─────────────────────────────────── #
+train:
+  total_iter: 250000
+  warmup_iter: -1
+  use_grad_clip: true
+  clip_grad_norm: 1.0
+
+  scheduler:
+    type: CosineAnnealingRestartCyclicLR
+    periods: [77000, 173000]
+    restart_weights: [1, 1]
+    eta_mins: [0.0003, 0.000001]
+
+  mixing_augs:
+    mixup: true
+    mixup_beta: 1.2
+    use_identity: true
+
+  optim_g:
+    type: Adam
+    lr: !!float 2e-4
+    betas: [0.9, 0.999]
+
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1
+    reduction: mean
+
+# ── Validation ───────────────────────────────────────────────────────── #
+val:
+  window_size: 4
+  val_freq: !!float 1e3
+  save_img: false
+  rgb2bgr: true
+  use_image: false
+  max_minibatch: 8
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+
+# ── Logging ──────────────────────────────────────────────────────────── #
+logger:
+  print_freq: 500
+  save_checkpoint_freq: !!float 5e3
+  use_tb_logger: true
+  wandb:
+    project: fd2rt-ladder
+    resume_id: ~
+
+# ── Distributed ──────────────────────────────────────────────────────── #
+dist_params:
+  backend: nccl
+  port: 29500
