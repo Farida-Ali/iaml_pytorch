@@ -89,7 +89,8 @@ class ICNF_Block_Dual(DDA_Block_Dual):
              for _ in range(n)])
 
     @classmethod
-    def from_dda(cls, dda, gate_slope=1.0, gate_bias=2.0, freq_init_std=1e-3):
+    def from_dda(cls, dda, gate_slope=1.0, gate_bias=2.0, freq_init_std=1e-3,
+                 gate_per_channel=False):
         """Build from an existing DDA_Block_Dual, transplanting its submodules.
 
         IDENTIFIABILITY FIX. A4 zero-initialises Freq_MSA.out_proj so the
@@ -113,8 +114,18 @@ class ICNF_Block_Dual(DDA_Block_Dual):
         nn.Module.__init__(obj)
         obj.blocks = dda.blocks              # keys blocks.* preserved
         obj.freq_blocks = dda.freq_blocks    # keys freq_blocks.* preserved
+        # Infer feature width from the transplanted attention block so the
+        # per-channel gate emits exactly one value per feature channel.
+        # freq_blocks[i].out_proj is Conv2d(dim, dim, 1), so its weight's first
+        # dim IS the feature width. (Taking the attention block's first
+        # parameter instead gives the fused qkv width, which is a multiple of
+        # dim and produces a broadcast error at the fusion.)
+        n_ch = 1
+        if gate_per_channel:
+            n_ch = int(dda.freq_blocks[0].out_proj.weight.shape[0])
         obj.gates = nn.ModuleList(
-            [ICNFGate(slope_init=gate_slope, bias_init=gate_bias)
+            [ICNFGate(slope_init=gate_slope, bias_init=gate_bias,
+                      out_channels=n_ch)
              for _ in range(len(dda.blocks))])
 
         for fb in obj.freq_blocks:
@@ -159,11 +170,12 @@ class ICNF_Denoiser(DDA_Denoiser_Dual):
     """DDA_Denoiser_Dual whose blocks use evidence-driven spatial gates."""
 
     def __init__(self, in_dim=3, out_dim=3, dim=31, level=2, num_blocks=None,
-                 gate_slope=1.0, gate_bias=2.0, freq_init_std=1e-3):
+                 gate_slope=1.0, gate_bias=2.0, freq_init_std=1e-3,
+                 gate_per_channel=False):
         super().__init__(in_dim=in_dim, out_dim=out_dim, dim=dim,
                          level=level, num_blocks=num_blocks)
         conv = lambda b: ICNF_Block_Dual.from_dda(
-            b, gate_slope, gate_bias, freq_init_std)
+            b, gate_slope, gate_bias, freq_init_std, gate_per_channel)
         for lyr in self.encoder_layers:
             lyr[0] = conv(lyr[0])
         self.bottleneck = conv(self.bottleneck)
@@ -181,7 +193,7 @@ class FD2RT_ICNF_Single_Stage(nn.Module):
                  num_blocks=None, illum_source='input', icnf_mode='subtract',
                  a_init=0.02, b_init=1e-5, learn_sensor=True,
                  icnf_window=9, gate_slope=1.0, gate_bias=2.0,
-                 freq_init_std=1e-3):
+                 freq_init_std=1e-3, gate_per_channel=False):
         super().__init__()
         if num_blocks is None:
             num_blocks = [1, 1, 1]
@@ -198,7 +210,7 @@ class FD2RT_ICNF_Single_Stage(nn.Module):
             in_dim=in_channels, out_dim=out_channels, dim=n_feat,
             level=level, num_blocks=num_blocks,
             gate_slope=gate_slope, gate_bias=gate_bias,
-            freq_init_std=freq_init_std)
+            freq_init_std=freq_init_std, gate_per_channel=gate_per_channel)
 
     def forward(self, img):
         # W-IE still supplies illumination features; its N_map output is no
@@ -246,7 +258,8 @@ class FD2RT_ICNF(RetinexFormer):
     def __init__(self, in_channels=3, out_channels=3, n_feat=31, stage=3,
                  num_blocks=None, illum_source='input', icnf_mode='subtract',
                  a_init=0.02, b_init=1e-5, learn_sensor=True, icnf_window=9,
-                 gate_slope=1.0, gate_bias=2.0, freq_init_std=1e-3):
+                 gate_slope=1.0, gate_bias=2.0, freq_init_std=1e-3,
+                 gate_per_channel=False):
         if num_blocks is None:
             num_blocks = [1, 1, 1]
         nn.Module.__init__(self)
@@ -258,7 +271,8 @@ class FD2RT_ICNF(RetinexFormer):
                 illum_source=illum_source, icnf_mode=icnf_mode,
                 a_init=a_init, b_init=b_init, learn_sensor=learn_sensor,
                 icnf_window=icnf_window, gate_slope=gate_slope,
-                gate_bias=gate_bias, freq_init_std=freq_init_std)
+                gate_bias=gate_bias, freq_init_std=freq_init_std,
+                gate_per_channel=gate_per_channel)
             for _ in range(stage)
         ])
 

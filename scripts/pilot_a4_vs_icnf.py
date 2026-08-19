@@ -144,6 +144,13 @@ def run_one(model_name, seed, train_imgs, val_lq, val_gt, args):
                         g.fill_(logit)
                     n_set += 1
         assert n_set > 0, 'A4const: found no scalar gates to set'
+    elif model_name == 'ICNFpc':
+        # VARIANT. Per-channel gate: the projection lets each feature channel
+        # choose its own frequency trust at a given location, instead of all
+        # channels sharing one scalar. Initialised to reproduce the shared gate
+        # exactly, so it is a strict generalisation of ICNFc.
+        net = FD2RT_ICNF(**kw, illum_source='constant',
+                         gate_bias=args.gate_bias, gate_per_channel=True)
     elif model_name == 'ICNFc':
         # CONTROL ARM. Full ICNF except the noise floor is spatially UNIFORM
         # (illum_source='constant'): same per-pixel gate, but conditioned only on

@@ -248,7 +248,8 @@ class ICNFGate(nn.Module):
     opens as training pushes `bias` down.
     """
 
-    def __init__(self, slope_init=1.0, bias_init=2.0, learnable=True):
+    def __init__(self, slope_init=1.0, bias_init=2.0, learnable=True,
+                 out_channels=1):
         super().__init__()
         slope = torch.tensor(float(slope_init))
         bias = torch.tensor(float(bias_init))
@@ -259,5 +260,25 @@ class ICNFGate(nn.Module):
             self.register_buffer('slope', slope)
             self.register_buffer('bias', bias)
 
+        # PER-CHANNEL VARIANT. With out_channels == 1 the gate emits a single
+        # scalar per pixel, shared across every feature channel -- so all
+        # channels are forced to trust high frequencies equally at a given
+        # location. A 1x1 projection lets channels specialise.
+        #
+        # Initialised to weight 1 / bias 0, so at step 0 every channel receives
+        # exactly the shared-gate value and the variant reduces EXACTLY to the
+        # scalar case. It is therefore a strict generalisation: it can only
+        # depart from the baseline by learning to.
+        self.out_channels = out_channels
+        if out_channels > 1:
+            self.proj = nn.Conv2d(1, out_channels, 1, bias=True)
+            nn.init.ones_(self.proj.weight)
+            nn.init.zeros_(self.proj.bias)
+        else:
+            self.proj = None
+
     def forward(self, evidence):
-        return torch.sigmoid(self.slope * (torch.log1p(evidence.clamp_min(0)) - self.bias))
+        z = self.slope * (torch.log1p(evidence.clamp_min(0)) - self.bias)
+        if self.proj is not None:
+            z = self.proj(z)
+        return torch.sigmoid(z)
