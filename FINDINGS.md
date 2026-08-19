@@ -22,6 +22,7 @@ Reproduce: `python3 scripts/pilot_a4_vs_icnf.py --arms <arms> --seeds 4 --iters 
 | H7 | A per-pixel gate beats A4's scalar gate | **SUPPORTED so far** — +1.73 dB, 4/4 seeds, +2.26 pooled sd |
 | H8 | That gain is the gate, not merely the init fix | **SUPPORTED** — gate +1.53 dB (4/4); init alone +0.20 dB (2/4, null) |
 | H9 | The gate's gain survives at the real architecture | **PARTIALLY SUPPORTED** — +1.37 dB holds, but 3/4 wins and effect size falls 2.26 → 0.92 SD |
+| H10 | The gain is spatial adaptivity, not a better constant gate level | **SUPPORTED** — spatial +1.63 dB (4/4); level alone −0.25 dB |
 
 ---
 
@@ -273,3 +274,62 @@ environment. What is delivered instead is a codebase where measurement is
 trustworthy, a controlled ladder, a pre-flight gate, and nine recorded verdicts
 - five of which killed hypotheses that would otherwise have consumed GPU-weeks
 before failing.
+
+
+---
+
+## P11 — spatial adaptivity vs gate level: the mechanism is confirmed
+
+ICNFc differed from A4 in two ways at once *again*: its gate varies spatially
+**and** averages 0.278 where A4's scalar gate sits at sigmoid(0) = 0.5. The
+boring explanation — "0.28 is simply a better mixing level, a one-line fix" —
+was live and had to be closed.
+
+`A4const` = A4 + the identifiability fix + a scalar gate pinned to exactly
+0.278: **same mean mixing, zero spatial variation.** Production architecture,
+4 paired seeds.
+
+| model | mean | std | per-seed |
+|---|---|---|---|
+| A4 (scalar @ 0.5) | 20.2546 | 1.523 | 19.454, 22.891, 19.392, 19.282 |
+| A4const (scalar @ 0.278) | 20.0021 | 1.189 | 19.607, 22.028, 19.372, 19.002 |
+| **ICNFc (per-pixel, mean 0.278)** | **21.6293** | 1.022 | 20.542, 22.887, 22.380, 20.709 |
+
+| contrast | isolates | Δ | paired wins |
+|---|---|---|---|
+| A4const − A4 | gate **level** alone | **−0.2525 dB** | — |
+| **ICNFc − A4const** | **spatial adaptivity** alone | **+1.6272 dB** | **4/4** |
+
+**A better constant buys nothing.** Moving the scalar gate from 0.5 to ICNFc's
+mean of 0.278 is slightly *harmful* (−0.25 dB). The whole effect comes from the
+gate varying across space.
+
+Controlling for the level **sharpened** the result rather than shrinking it:
+
+| comparison | Δ | wins | effect size |
+|---|---|---|---|
+| ICNFc − A4 (uncontrolled) | +1.37 dB | 3/4 | +0.92 sd |
+| **ICNFc − A4const (controlled)** | **+1.63 dB** | **4/4** | **+1.27 sd** |
+
+The gate level was working slightly against the mechanism, so removing it as a
+confound revealed a larger, unanimous effect. This is the strongest and
+cleanest result in the project.
+
+### The claim, as it now stands
+
+A4's frequency-branch gate is **one learned scalar per block**. That cannot
+express "trust high frequencies *here* but not *there*" — the decision the block
+must make, because identical absolute high-frequency energy means texture in a
+lit region and sensor noise in a shadow. The gate is also **unidentifiable at
+initialisation** (`out_proj` zero-init ⟹ `B ≡ 0` ⟹ `dL/d(gate) = 0`), so it may
+never move off its initial value.
+
+Replacing it with a **per-pixel gate** driven by local high-frequency energy
+against a **uniform** noise floor gives **+1.63 dB over a level-matched control,
+4/4 seeds, +1.27 pooled sd**, at the exact LOL-v1 architecture.
+
+Isolated by four controls: mismatched noise (physics not the cause), constant
+floor (illumination-conditioning harmful), init-only (null), and level-matched
+(constant gate buys nothing). No Retinex physics, no wavelet-necessity argument
+— a gating mechanism whose failure mode is diagnosed and whose causal
+contribution is measured.
