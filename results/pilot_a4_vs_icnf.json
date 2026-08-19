@@ -1,0 +1,27 @@
+{
+  "args": {
+    "data": "/tmp/corpus",
+    "iters": 60,
+    "seeds": 1,
+    "batch": 4,
+    "patch": 64,
+    "n_feat": 16,
+    "lr": 0.0002,
+    "a": 0.02,
+    "b": 1e-05,
+    "mean": 0.12,
+    "mismatch": false,
+    "verbose": true,
+    "out": "results/pilot_a4_vs_icnf.json"
+  },
+  "results": {
+    "A4": [
+      14.495460867881775
+    ],
+    "ICNF": [
+      14.927624106407166
+    ]
+  },
+  "delta_db": 0.4321632385253906,
+  "wins": 1
+}
