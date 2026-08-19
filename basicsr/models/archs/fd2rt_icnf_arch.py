@@ -185,9 +185,9 @@ class FD2RT_ICNF_Single_Stage(nn.Module):
         super().__init__()
         if num_blocks is None:
             num_blocks = [1, 1, 1]
-        if illum_source not in ('input', 'illu_map'):
-            raise ValueError(f"illum_source must be 'input' or 'illu_map', "
-                             f"got {illum_source}")
+        if illum_source not in ('input', 'illu_map', 'constant'):
+            raise ValueError(f"illum_source must be 'input', 'illu_map' or "
+                             f"'constant', got {illum_source}")
         self.illum_source = illum_source
 
         self.estimator = WaveletIlluminationEstimator(n_feat)
@@ -208,6 +208,17 @@ class FD2RT_ICNF_Single_Stage(nn.Module):
         if self.illum_source == 'illu_map':
             # illu_map = I_lu / img - 1, recovered without a second forward.
             illum = (I_lu / img.clamp_min(1e-4) - 1.0).clamp(0, 10)
+        elif self.illum_source == 'constant':
+            # ABLATION CONTROL. Replace the spatially-varying illumination with
+            # its per-image global mean, so the noise floor a*I + b is UNIFORM.
+            # The gate is still per-pixel (driven by the spatial variation of the
+            # HF energy E), but it is no longer illumination-CONDITIONED. This
+            # isolates the causal question the mismatched-noise pilot raised: if
+            # ICNF's advantage survives when the exact noise law is wrong, is it
+            # coming from conditioning the floor on illumination at all, or purely
+            # from having a per-pixel adaptive gate? ICNF-vs-constant answers it.
+            lm = img.mean(dim=1, keepdim=True)                 # [B,1,H,W]
+            illum = lm.mean(dim=(2, 3), keepdim=True).expand_as(lm)
         else:
             illum = None            # ICNF falls back to a local mean of img
 

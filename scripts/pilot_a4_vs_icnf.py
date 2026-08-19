@@ -122,6 +122,13 @@ def run_one(model_name, seed, train_imgs, val_lq, val_gt, args):
         for nm, mod in net.named_modules():
             if 'freq_blocks' in nm and nm.endswith('out_proj'):
                 torch.nn.init.normal_(mod.weight, mean=0.0, std=1e-3)
+    elif model_name == 'ICNFc':
+        # CONTROL ARM. Full ICNF except the noise floor is spatially UNIFORM
+        # (illum_source='constant'): same per-pixel gate, but conditioned only on
+        # the HF energy, not on illumination. ICNF-vs-ICNFc isolates whether
+        # conditioning the floor on illumination adds anything over a bare
+        # adaptive gate — the question the mismatched-noise result forced open.
+        net = FD2RT_ICNF(**kw, illum_source='constant')
     else:
         net = FD2RT_ICNF(**kw)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr, betas=(0.9, 0.999))
