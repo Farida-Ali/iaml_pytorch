@@ -21,6 +21,7 @@ Reproduce: `python3 scripts/pilot_a4_vs_icnf.py --arms <arms> --seeds 4 --iters 
 | H6 | Adaptive computation via evidence is a viable contribution | **REJECTED** — measured, did not pay for itself |
 | H7 | A per-pixel gate beats A4's scalar gate | **SUPPORTED so far** — +1.73 dB, 4/4 seeds, +2.26 pooled sd |
 | H8 | That gain is the gate, not merely the init fix | **SUPPORTED** — gate +1.53 dB (4/4); init alone +0.20 dB (2/4, null) |
+| H9 | The gate's gain survives at the real architecture | **PARTIALLY SUPPORTED** — +1.37 dB holds, but 3/4 wins and effect size falls 2.26 → 0.92 SD |
 
 ---
 
@@ -189,3 +190,51 @@ Evaluation protocol notes for whoever writes the paper:
   "PSNR best" column is test-selected and should not be reported. The
   `robust_eval` last-10-checkpoint mean does not touch `best_psnr_*.pth` and is
   the honest number.
+
+
+---
+
+## P10 — scale sensitivity at the production architecture
+
+The surviving claim was measured at `n_feat=16`, `num_blocks=[1,1,1]` — one
+sixth the channel width of the real config. Re-run at the **exact LOL-v1
+architecture**: `n_feat=40`, `num_blocks=[1,2,2]`, 2,167,464 params, identical
+to `Options/train_FD2RT_ICNF_LOL_v1.yml`. 4 paired seeds, 1500 iters, CPU
+(~10.6 min/run).
+
+| model | mean | std | per-seed |
+|---|---|---|---|
+| A4 | 20.2546 | 1.523 | 19.454, 22.891, 19.392, 19.282 |
+| **ICNFc** | **21.6293** | 1.022 | 20.542, 22.887, 22.380, 20.709 |
+
+**Δ = +1.3747 dB, 3/4 paired wins, +0.92 pooled sd.**
+
+### Scale comparison
+
+| scale | Δ | paired wins | effect size |
+|---|---|---|---|
+| `n_feat=16`, `[1,1,1]` | +1.73 dB | 4/4 | +2.26 sd |
+| `n_feat=40`, `[1,2,2]` | +1.37 dB | 3/4 | **+0.92 sd** |
+
+**The effect survives but weakens: effect size falls ~60% at production width.**
+The mean gap barely moved (−0.36 dB), but A4's seed variance doubled
+(0.74 → 1.52), which is what collapses the standardised effect.
+
+**Seed 1 is the informative failure.** A4 22.891 vs ICNFc 22.887 — a dead tie
+(−0.005 dB), on the seed where *both* models did far better than the other
+three. The baseline found a good basin unaided and the gate bought nothing
+there. ICNFc never *lost* on any seed, but it is no longer unanimous.
+
+Read honestly: the trend runs the wrong way as capacity grows, and LOL-v1 at
+250K iterations is a far larger scale jump than the one tested here. The gap
+could compress further. This is the main risk the GPU runs must resolve.
+
+### Secondary claim, visible in both experiments
+
+**ICNFc consistently reduces run-to-run variance**: std 1.02 vs 1.52 at
+production scale, 0.58 vs 0.74 at reduced scale. It lifts the weak seeds much
+more than the strong one (seed 2: 19.39 → 22.38; seed 1: no change). If the
+mean gap compresses further at full scale, *training stability* may be the more
+durable contribution — and it is consistent with the diagnosed mechanism, since
+a scalar gate that is unidentifiable at init leaves the frequency branch's
+usefulness to chance.
