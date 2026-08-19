@@ -190,6 +190,9 @@ def main():
     ap.add_argument('--data', default='/tmp/corpus')
     ap.add_argument('--iters', type=int, default=1200)
     ap.add_argument('--seeds', type=int, default=3)
+    ap.add_argument('--seed_offset', type=int, default=0,
+                    help='first seed index; use to extend an existing run with '
+                         'fresh seeds without repeating the ones already done')
     ap.add_argument('--batch', type=int, default=4)
     ap.add_argument('--patch', type=int, default=64)
     ap.add_argument('--n_feat', type=int, default=16)
@@ -245,7 +248,7 @@ def main():
 
     arms = args.arms.split(',')
     results = {a: [] for a in arms}
-    for seed in range(args.seeds):
+    for seed in range(args.seed_offset, args.seed_offset + args.seeds):
         for name in arms:
             p, secs = run_one(name, seed, train_imgs, val_lq, val_gt, args)
             results[name].append(p)
