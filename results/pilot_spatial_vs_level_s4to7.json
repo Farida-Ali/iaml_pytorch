@@ -1,0 +1,38 @@
+{
+  "args": {
+    "data": "/tmp/corpus",
+    "iters": 1500,
+    "seeds": 4,
+    "seed_offset": 4,
+    "batch": 4,
+    "patch": 64,
+    "n_feat": 40,
+    "gate_level": 0.278,
+    "gate_bias": 2.0,
+    "num_blocks": "1,2,2",
+    "lr": 0.0002,
+    "a": 0.02,
+    "b": 1e-05,
+    "mean": 0.12,
+    "mismatch": false,
+    "arms": "A4const,ICNFc",
+    "verbose": false,
+    "out": "results/pilot_spatial_vs_level_s4to7.json"
+  },
+  "results": {
+    "A4const": [
+      19.182106971740723,
+      20.703408122062683,
+      20.2049001455307,
+      21.920023918151855
+    ],
+    "ICNFc": [
+      21.592185139656067,
+      21.71938669681549,
+      20.68130111694336,
+      21.72333514690399
+    ]
+  },
+  "delta_db": 0.9264422357082367,
+  "wins": 3
+}
