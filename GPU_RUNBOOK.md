@@ -170,3 +170,41 @@ seeds, which is a second reason §4 matters.
 - Per-seed PSNRs for A4 and ICNFc, not just the means.
 - Any pre-flight failure, verbatim — it is designed to catch exactly the
   failures that have already cost this project results.
+
+
+---
+
+## Appendix: verified egress facts (for sourcing the data)
+
+Tested from this container's proxy, by measurement:
+
+| host | reachable? | implication |
+|---|---|---|
+| raw.githubusercontent.com | YES (HTTP 200) | small files under a GitHub repo CAN be fetched |
+| github.com (git) | git proxy only | clone works for allowed repos |
+| Google Drive / Kaggle / Zenodo / HuggingFace | NO (blocked) | the usual LOL-v1 download links do not work here |
+
+So if you must source LOL-v1 from within a restricted session rather than
+placing it on the GPU box directly, a GitHub-hosted mirror on raw.githubusercontent.com
+is the only channel that responds. Files tracked by git-LFS return 403 on the
+`/raw/` path, so a mirror must store the images as plain blobs. Confirm any such
+mirror's licence and integrity before training on it.
+
+The simplest path remains: put LOL-v1 on the GPU machine directly (scp/rsync from
+wherever you already have it), which sidesteps egress entirely.
+
+## Appendix: why this could not be finished in-container
+
+Two independent walls, both measured, not assumed:
+
+1. COMPUTE. At the production architecture this container runs the model at
+   ~4.47 s/training-step on CPU. A single 250K-iteration run is therefore
+   ~12.9 days -- and the container is ephemeral (it was recycled mid-session
+   once already). Even one ladder rung cannot complete here.
+2. DATA. LOL-v1 is not on disk and its standard hosts are egress-blocked
+   (table above).
+
+Neither is an effort problem; both are environment constraints. Everything that
+CPU + code + controlled synthetic experiments CAN establish has been established
+(see FINDINGS.md). The remaining step -- benchmark PSNR on LOL-v1 -- requires a
+GPU-backed session with the dataset present, and is specified above.
