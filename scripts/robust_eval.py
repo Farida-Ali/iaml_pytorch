@@ -61,8 +61,18 @@ LOL_V1_KWARGS = dict(in_channels=3, out_channels=3, n_feat=40,
                      stage=1, num_blocks=[1, 2, 2])
 
 
-def _build_model(arch_name):
+def _build_model(arch_name, extra_kwargs=None):
+    """Build an architecture by name.
+
+    extra_kwargs lets Mode B pass the config's network_g settings through -- this
+    matters for FD2RT_ICNF, whose forward path depends on illum_source/icnf_mode.
+    Evaluating an ICNFc checkpoint with the wrong illum_source silently uses a
+    different forward path and reports a meaningless number.
+    """
     import basicsr  # noqa
+    kw = dict(LOL_V1_KWARGS)
+    if extra_kwargs:
+        kw.update(extra_kwargs)
     if arch_name == 'FD2RT_V1':
         from basicsr.models.archs.fd2rt_v1_arch import FD2RT_V1
         return FD2RT_V1(**LOL_V1_KWARGS)
@@ -72,12 +82,29 @@ def _build_model(arch_name):
     elif arch_name == 'FD2RT_A4':
         from basicsr.models.archs.fd2rt_a4_arch import FD2RT_A4
         return FD2RT_A4(**LOL_V1_KWARGS)
+    elif arch_name == 'FD2RT_ICNF':
+        from basicsr.models.archs.fd2rt_icnf_arch import FD2RT_ICNF
+        # Default to the trained configuration; Mode B overrides from the config.
+        kw.setdefault('illum_source', 'constant')
+        return FD2RT_ICNF(**kw)
     elif arch_name == 'RetinexFormer':
         from basicsr.models.archs.RetinexFormer_arch import RetinexFormer
         return RetinexFormer(**LOL_V1_KWARGS)
     else:
-        raise ValueError(f'Unknown arch: {arch_name}. '
-                         f'Choices: FD2RT_V1, FD2RT_A2, FD2RT_A4, RetinexFormer')
+        raise ValueError(f'Unknown arch: {arch_name}. Choices: FD2RT_V1, '
+                         f'FD2RT_A2, FD2RT_A4, FD2RT_ICNF, RetinexFormer')
+
+
+def _net_kwargs_from_config(config_path):
+    """Return the non-type keys of network_g (e.g. illum_source for ICNF)."""
+    import yaml
+    with open(config_path) as f:
+        opt = yaml.safe_load(f)
+    ng = dict(opt.get('network_g', {}))
+    ng.pop('type', None)
+    # Keep only kwargs the arch constructors accept generically; the ICNF ones
+    # (illum_source, icnf_mode, a_init, ...) pass straight through.
+    return ng
 
 
 def _load_state(path, model, device):
@@ -149,7 +176,8 @@ def parse_args():
 
     # Mode A: explicit arch + ckpt dir
     p.add_argument('--arch',
-                   choices=['FD2RT_V1', 'FD2RT_A2', 'FD2RT_A4', 'RetinexFormer'],
+                   choices=['FD2RT_V1', 'FD2RT_A2', 'FD2RT_A4', 'FD2RT_ICNF',
+                            'RetinexFormer'],
                    help='Architecture name (Mode A)')
     p.add_argument('--ckpt_dir',
                    help='Directory containing net_g_*.pth files (Mode A)')
@@ -205,8 +233,10 @@ def main():
     args = parse_args()
 
     # Resolve mode
+    net_extra = None
     if args.config and args.exp_dir:
         arch_name = _arch_from_config(args.config)
+        net_extra = _net_kwargs_from_config(args.config)
         ckpt_dir  = os.path.join(args.exp_dir, 'models')
         label     = args.label or os.path.basename(args.exp_dir)
         if args.data_root:
@@ -280,7 +310,7 @@ def main():
     print(f'Test images : {len(lq_paths)}')
 
     # Build model once, swap weights per checkpoint
-    model = _build_model(args.arch).to(device)
+    model = _build_model(args.arch, extra_kwargs=net_extra).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f'Params      : {n_params:,}')
 
