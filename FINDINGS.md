@@ -24,6 +24,7 @@ Reproduce: `python3 scripts/pilot_a4_vs_icnf.py --arms <arms> --seeds 4 --iters 
 | H9 | The gate's gain survives at the real architecture | **PARTIALLY SUPPORTED** — +1.37 dB holds, but 3/4 wins and effect size falls 2.26 → 0.92 SD |
 | H10 | The gain is spatial adaptivity, not a better constant gate level | **SUPPORTED** — spatial +1.63 dB (4/4); level alone −0.25 dB |
 | H11 | A per-channel gate improves on the shared gate | **REFUTED** — pooled over 8 seeds: +0.20 dB at **4/8 wins**, i.e. chance |
+| H12 | The spatial-gate claim survives replication (not just 4 lucky seeds) | **SUPPORTED** — pooled 8 seeds: **+1.28 dB, 7/8 wins**, +1.22 paired sd |
 
 ---
 
@@ -411,3 +412,34 @@ the second killed specifically by replication rather than by a control.
 `gate_per_channel` remains implemented and is worth reporting as a negative
 ablation — "channel specialisation does not help" is a legitimate finding —
 but it is not part of the claim.
+
+
+---
+
+## P14 — primary claim replicated (8-seed verdict)
+
+P13 taught that a 4-seed result at 3/4 wins can evaporate, so the PRIMARY claim
+(ICNFc vs A4const, +1.63 dB on seeds 0-3) was held to the same standard: seeds
+4-7 were run and pooled.
+
+| block | ICNFc − A4const | paired wins |
+|---|---|---|
+| seeds 0–3 (P11) | +1.6272 dB | 4/4 |
+| seeds 4–7 (P14) | +0.9264 dB | 3/4 |
+| **pooled 0–7** | **+1.2768 dB** | **7/8, +1.22 paired sd** |
+
+Per-seed deltas across all eight:
+
+    +0.935  +0.859  +3.008  +1.707  +2.410  +1.016  +0.476  -0.197
+
+Unlike the per-channel gate (P13), this did NOT collapse: every block points the
+same way, seven of eight seeds are positive, and the one negative (-0.20) is the
+smallest deviation in the set. The effect is not carried by any single seed. The
+second block is weaker (+0.93 vs +1.63) but confirms direction and sign.
+
+**Verdict.** The spatial-adaptivity contribution is the one claim in this project
+that survived (a) four isolating controls and (b) replication on fresh seeds. It
+is the claim to take to the GPU. Pooled effect at the production architecture:
+ICNFc beats a level-matched, identifiability-fixed A4 baseline by **+1.28 dB,
+7/8 seeds**. Still a scaled-down synthetic pilot -- direction, not a benchmark
+number -- but it is now as well-supported as CPU experiments can make it.
