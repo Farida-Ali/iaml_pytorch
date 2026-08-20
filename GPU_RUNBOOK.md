@@ -132,10 +132,11 @@ Train **ICNFc** (`Options/train_FD2RT_ICNF_LOL_v1.yml`, `illum_source: constant`
 as the primary arm. It is the claim that survived four controls unanimously:
 **+1.63 dB over a level-matched baseline, 4/4 seeds, +1.27 sd**.
 
-A per-channel gate variant (`gate_per_channel: true`) measured a further
-+0.47 dB, but at 3/4 wins and only +0.39 sd, with a single seed supplying most
-of it. Carry it as a **secondary/ablation** arm if seed budget allows; do not
-build the headline on it without more seeds.
+A per-channel gate variant (`gate_per_channel: true`) looked promising on four
+seeds (+0.47 dB) but was **refuted by replication**: over eight seeds it is
++0.20 dB at **4/8 paired wins**, i.e. chance. Do **not** train it as a primary
+arm. It is still worth one run as a *negative* ablation — "channel
+specialisation does not help" — but it is not part of the claim.
 
 ---
 

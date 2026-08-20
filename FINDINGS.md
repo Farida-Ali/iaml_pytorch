@@ -23,7 +23,7 @@ Reproduce: `python3 scripts/pilot_a4_vs_icnf.py --arms <arms> --seeds 4 --iters 
 | H8 | That gain is the gate, not merely the init fix | **SUPPORTED** — gate +1.53 dB (4/4); init alone +0.20 dB (2/4, null) |
 | H9 | The gate's gain survives at the real architecture | **PARTIALLY SUPPORTED** — +1.37 dB holds, but 3/4 wins and effect size falls 2.26 → 0.92 SD |
 | H10 | The gain is spatial adaptivity, not a better constant gate level | **SUPPORTED** — spatial +1.63 dB (4/4); level alone −0.25 dB |
-| H11 | A per-channel gate improves on the shared gate | **WEAKLY SUGGESTED** — +0.47 dB but 3/4 and only +0.39 sd; one seed carries it |
+| H11 | A per-channel gate improves on the shared gate | **REFUTED** — pooled over 8 seeds: +0.20 dB at **4/8 wins**, i.e. chance |
 
 ---
 
@@ -375,3 +375,39 @@ Recommendation for the GPU campaign: train **ICNFc** as the primary arm — it i
 the claim that survived four controls unanimously. Carry ICNFpc as a secondary
 arm only if seed budget allows, and report it as an ablation, not a headline,
 unless more seeds firm it up.
+
+
+---
+
+## P13 — per-channel gate refuted by replication
+
+P12's +0.47 dB rested on a single seed, so it was flagged as fragile rather
+than banked. Seeds 4-7 were run to settle it.
+
+| seeds | Δ (ICNFpc − ICNFc) | paired wins |
+|---|---|---|
+| 0–3 (P12) | +0.47 dB | 3/4 |
+| **4–7 (P13)** | **−0.08 dB** | **1/4** |
+| **0–7 pooled** | **+0.20 dB** | **4/8 — chance** |
+
+Per-seed deltas across all eight:
+
+    -0.060  +0.552  +0.089  +1.298  -0.069  +0.204  -0.414  -0.038
+
+**Four wins out of eight is exactly chance.** The per-channel gate does
+nothing. The apparent +0.47 dB was seed 3 (+1.298 dB) dominating a
+four-sample mean.
+
+Seeds 4-7 also happen to be a quieter block (ICNFc sd 0.43 vs 1.02 for seeds
+0-3), which makes the null cleaner rather than noisier.
+
+**Why this matters procedurally.** Had P12's +0.47 dB been reported as a
+headline, the cumulative claim would have been +2.10 dB instead of +1.63 dB —
+a phantom 0.47 dB carried into a GPU campaign and into a paper. Four extra CPU
+hours prevented that. It is the seventh hypothesis killed in this project and
+the second killed specifically by replication rather than by a control.
+
+**Consequence:** ICNFc (shared per-pixel gate) is the final architecture.
+`gate_per_channel` remains implemented and is worth reporting as a negative
+ablation — "channel specialisation does not help" is a legitimate finding —
+but it is not part of the claim.
