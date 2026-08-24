@@ -294,16 +294,25 @@ def main():
         label_s = f'iter {it:>7d}' if it else 'best'
         print(f'  {label_s}  {os.path.basename(c)}')
 
-    # Test images
-    lq_paths = natsorted(
-        glob(os.path.join(args.data_root, 'input', '*.png')) +
-        glob(os.path.join(args.data_root, 'input', '*.jpg')))
-    gt_paths = natsorted(
-        glob(os.path.join(args.data_root, 'target', '*.png')) +
-        glob(os.path.join(args.data_root, 'target', '*.jpg')))
+    # Test images. Different LOL variants name the subdirs differently:
+    #   LOL-v1        : input/ (lq)  target/ (gt)
+    #   LOL-v2-real   : Low/   (lq)  Normal/ (gt)
+    # Auto-detect so the same command works on both.
+    def _find(root, names):
+        for n in names:
+            hits = natsorted(glob(os.path.join(root, n, '*.png')) +
+                             glob(os.path.join(root, n, '*.jpg')) +
+                             glob(os.path.join(root, n, '*.bmp')))
+            if hits:
+                return hits, n
+        return [], names[0]
+    lq_paths, lq_sub = _find(args.data_root, ['input', 'Low', 'low'])
+    gt_paths, gt_sub = _find(args.data_root, ['target', 'Normal', 'normal', 'high'])
     if len(lq_paths) == 0:
-        print(f'ERROR: no test images found under {args.data_root}/input/')
+        print(f'ERROR: no test images under {args.data_root}/ '
+              f'(looked for input|Low and target|Normal subdirs)')
         return 1
+    print(f'  lq subdir: {lq_sub}   gt subdir: {gt_sub}   ({len(lq_paths)} images)')
     if len(lq_paths) != len(gt_paths):
         print(f'ERROR: image count mismatch: lq={len(lq_paths)} gt={len(gt_paths)}')
         return 1
