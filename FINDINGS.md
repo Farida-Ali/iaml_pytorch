@@ -443,3 +443,56 @@ is the claim to take to the GPU. Pooled effect at the production architecture:
 ICNFc beats a level-matched, identifiability-fixed A4 baseline by **+1.28 dB,
 7/8 seeds**. Still a scaled-down synthetic pilot -- direction, not a benchmark
 number -- but it is now as well-supported as CPU experiments can make it.
+
+---
+
+## P15 — LOL-v1 benchmark (the real answer): the mechanism did NOT transfer
+
+Full-scale GPU campaign on real LOL-v1 (250K iters, robust last-10-checkpoint
+mean, 15 test images, raw PSNR / no GT-mean). Raw table:
+results/lolv1_campaign_comparison_table.csv.
+
+| rung | arch | PSNR | note |
+|---|---|---|---|
+| A0 | RetinexFormer | 22.936 | anchor, 1 seed |
+| A1 | FD2RT_V1 (W-IE) | **23.016** | 1 seed — best number here |
+| A4 | FD2RT_A4 | 22.758 ± 0.224 | 3 seeds |
+| ICNFc | FD2RT_ICNF | 22.600 ± 0.031 | 3 seeds |
+
+### Headline claim: REFUTED on the benchmark
+ICNFc − A4, paired by seed: s100 −0.419, s101 +0.070, s102 −0.124.
+mean **−0.158 dB, 1/3 wins, t(2) = −1.11 (not significant)**.
+
+The +1.28 dB the spatial gate showed on the synthetic CPU pilot did NOT
+transfer. On real LOL-v1 it is a slight, non-significant LOSS. This kills the
+primary positive hypothesis of the project.
+
+This was the predicted risk. P10 recorded: "the trend runs the wrong way as
+capacity grows … LOL-v1 at 250K iters is a far larger jump. The gap may compress
+further. This is the main risk." It did not merely compress — it crossed zero.
+The synthetic Poisson-Gaussian pilot on downsampled photos was a favourable,
+unrepresentative proxy for LOL-v1's real noise and content.
+
+### The whole ladder is flat-to-negative
+No FD2RT architectural addition improves PSNR on LOL-v1. A1 (single seed) is the
+best; A4 and ICNFc fall below it and are statistically indistinguishable from
+the A0/A1 baseline given A4's 0.22 dB seed spread (its best seed, 23.003, equals
+A1). The additions buy nothing on this benchmark.
+
+### What survived
+ICNFc has 7.3x tighter seed variance than A4 (std 0.031 vs 0.224) — the pilot's
+secondary claim held. SSIM +0.0012 (within noise). "No better on average, much
+more stable" is a minor secondary finding, not a headline.
+
+### Baseline caveat
+A0 = 22.94 raw is ~1 dB below published RetinexFormer (~23.9 without GT-mean),
+so the reproduction is light. The relative ladder is internally valid (shared
+protocol) but a "beats RetinexFormer" claim is not supported until the baseline
+is matched.
+
+### Verdict
+Not SOTA. The core positive claim is contradicted by the benchmark. This is a
+complete, rigorous NEGATIVE result. The value of the project is now the
+methodology (bug fixes, controlled protocol, honest ablation) and the negative
+finding itself — that a per-pixel frequency-evidence gate does not improve
+low-light restoration on LOL-v1 — plus the minor variance-reduction observation.
